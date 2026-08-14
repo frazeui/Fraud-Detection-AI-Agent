@@ -2,7 +2,7 @@
 
 An AI agent that analyzes financial transactions for fraud risk using multi-signal reasoning, with a human-in-the-loop safety layer for high-risk decisions. Built with LangGraph and deployed as a REST API.
 
-## Problem
+## Problems
 
 Automated fraud detection systems face a core tension: they need to act fast, but fully autonomous blocking of transactions carries real financial and reputational risk if the system gets it wrong. This project explores a practical middle ground — an AI agent that reasons over multiple risk signals and explains its findings, but defers the final call on high-risk cases to a human reviewer rather than acting unilaterally.
 
