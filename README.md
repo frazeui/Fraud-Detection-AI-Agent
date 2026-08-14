@@ -101,15 +101,3 @@ curl -X POST 'http://localhost:8000/human_decision' \
   }'
 ```
 
-## Current Limitations
-
-- Rule thresholds are simplified (fixed multipliers of a user's average transaction) rather than derived from real historical distributions.
-- No persistent transaction history — each analysis is independent and doesn't factor in a user's past flagged activity.
-- No adversarial testing yet (e.g., prompt injection attempts against the agent's reasoning).
-
-## Roadmap
-
-- [ ] RAG layer over fraud policy / compliance documents, so the agent reasons against actual written policy rather than hardcoded thresholds
-- [ ] Transaction history as context (pattern detection across a user's past activity)
-- [ ] Adversarial/security testing of the agent itself (prompt injection resistance)
-- [ ] Multilingual support for transaction descriptions (Arabic + English)
