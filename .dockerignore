@@ -1,0 +1,40 @@
+# Environment & Secrets - NEVER include in Docker image
+.env
+*.key
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Jupyter/Colab
+.ipynb_checkpoints/
+*.ipynb
+
+# Local database files (fresh one will be created in the container)
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed inside the running container)
+README.md
+docs/
+
+# IDE
+.vscode/
+.idea/
