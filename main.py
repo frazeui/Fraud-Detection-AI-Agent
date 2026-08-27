@@ -19,6 +19,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
+from redis_client import redis_client
+
 
 
 load_dotenv()  
@@ -290,6 +292,40 @@ class HumanDecisionRequest(BaseModel):
     thread_id: str
     decision: str
 
+class TransactionExtraction(BaseModel):
+    amount:Optional[float]=None
+    country:Optional[str]=None
+    last_hour_transaction: Optional[str]=None
+
+transaction_extraction_llm=llm_risk.with_structured_output(TransactionExtraction)
+
+TRANSACTION_EXTRACTION_PROMPT = """
+Extract transaction information from the user's description.
+
+Extract only information that is explicitly present.
+
+Fields:
+- amount
+- last_hour_transaction | velocity
+- country
+
+
+If a field is not present, return null.
+"""
+
+
+def extract_transaction_data(description:str)->str:
+    messages=[
+        SystemMessage(content=TRANSACTION_EXTRACTION_PROMPT),
+        HumanMessage(content=description)
+    ]
+    result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
+
+    data=result.model_dump(exclude_none=True)
+
+    return data
+
+
 
 @api.post("/analyze_transactions_with_documents")
 async def analyze_transactions_with_documents(
@@ -297,7 +333,20 @@ async def analyze_transactions_with_documents(
     description: str = Form(...),
     document: UploadFile = File(...)
 ):
-    start = time.time()
+    start = time.time() 
+    try:
+
+        transaction_data=extract_transaction_data(description)
+        
+        if transaction_data:
+            redis_client.hset(f"transaction: {thread_id}",mapping=transaction_data)
+    except Exception as e:
+        return {
+            "status":"Error",
+            "Error ":f"Transaction extraction failed: {str(e)}"
+        }
+
+
     image_bytes = await document.read()
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
 

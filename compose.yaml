@@ -9,3 +9,7 @@ services:
     volumes:
       - ./data:/app/data   # Persists the SQLite DB across container restarts
     restart: unless-stopped
+
+  redis: 
+    image: redis:7.0-alpine
+    restart: unless-stopped
