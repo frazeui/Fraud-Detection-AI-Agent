@@ -334,37 +334,40 @@ async def analyze_transactions_with_documents(
     document: UploadFile = File(...)
 ):
     start = time.time() 
-    try:
-        transaction_data = extract_transaction_data(description)
-        print("EXTRACTED DATA:", transaction_data)
+    transaction_data = extract_transaction_data(description)
 
-    except Exception as e:
-        return {
-            "status": "Error",
-            "error": f"Transaction extraction failed: {str(e)}"
-        }
+    print("EXTRACTED DATA:", transaction_data)
 
+    if transaction_data:
+        try:
+            print("BEFORE REDIS PING")
 
-    try:
-        if transaction_data:
-            print("REDIS CLIENT:", redis_client)
-            print("REDIS CONFIG:", redis_client.connection_pool.connection_kwargs)
+            redis_client.ping()
 
-            print("REDIS PING:", redis_client.ping())
+            print("REDIS PING SUCCESS")
 
-            redis_client.hset(
-                f"transaction:{thread_id}",
+            key = f"transaction:{thread_id}"
+
+            print("REDIS KEY:", key)
+
+            hset_result = redis_client.hset(
+                key,
                 mapping=transaction_data
             )
 
-            print("REDIS WRITE SUCCESS")
+            print("REDIS HSET SUCCESS:", hset_result)
 
-    except Exception as e:
-        return {
-            "status": "Error",
-            "error": f"Redis storage failed: {str(e)}"
-        }
+            stored_data = redis_client.hgetall(key)
 
+            print("REDIS STORED DATA:", stored_data)
+
+        except Exception as e:
+            print("REDIS FAILURE:", type(e).__name__, str(e))
+
+            return {
+                "status": "Error",
+                "Error": f"Redis storage failed: {str(e)}"
+            }
 
     image_bytes = await document.read()
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
