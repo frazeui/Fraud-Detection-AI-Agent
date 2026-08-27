@@ -295,7 +295,7 @@ class HumanDecisionRequest(BaseModel):
 class TransactionExtraction(BaseModel):
     amount:Optional[float]=None
     country:Optional[str]=None
-    last_hour_transaction: Optional[str]=None
+    last_hour_transaction: Optional[int]=None
 
 transaction_extraction_llm=llm_risk.with_structured_output(TransactionExtraction)
 
