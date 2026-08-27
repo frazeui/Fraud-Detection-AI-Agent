@@ -20,6 +20,7 @@ import sqlite3
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
 from redis_client import redis_client
+import json
 
 
 
@@ -82,7 +83,7 @@ class Document_Extraction_Result(BaseModel):
     id_number: Optional[str] = Field(default=None, description="ID/document number, if visible")
     date_of_birth: Optional[str] = Field(default=None, description="Date of birth, if visible")
     appears_authentic: Literal["yes", "no"] = Field(description="Overall authenticity assessment")
-    red_flags: list[str] = Field(description="Specific visual red flags found, if any. Empty list if none.")
+    red_flags: list[str] = Field(default_factory=list,description="Specific visual red flags found, if any. Empty list if none.")
     font_consistency: Literal["consistent", "inconsistent", "cannot_determine"] = Field(description="Whether fonts/styles appear consistent")
     tampering_indicators: list[str] = Field(description="Signs of digital editing or tampering, if any")
     confidence_level: Literal["Low", "Medium", "High"] = Field(description="Confidence in this assessment")
@@ -101,7 +102,6 @@ decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
 llm_vision = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=5000, api_key=GROQ_API_KEY)
-document_verification_llm = llm_vision.with_structured_output(Document_Extraction_Result)
 
 
 
@@ -182,9 +182,10 @@ def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
         {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ])
-    result: Document_Extraction_Result = document_verification_llm.invoke([message])
-    return result
+    response=llm_vision.invoke([message])
+    data=json.loads(response.content)
 
+    return Document_Extraction_Result.model_validate(data)
 
 def document_verification_node(state: AgentState):
     base64_image = state.get("document_image")
@@ -334,40 +335,12 @@ async def analyze_transactions_with_documents(
     document: UploadFile = File(...)
 ):
     start = time.time() 
-    transaction_data = extract_transaction_data(description)
 
-    print("EXTRACTED DATA:", transaction_data)
-
+    transaction_data=extract_transaction_data(description)
+    
     if transaction_data:
-        try:
-            print("BEFORE REDIS PING")
-
-            redis_client.ping()
-
-            print("REDIS PING SUCCESS")
-
-            key = f"transaction:{thread_id}"
-
-            print("REDIS KEY:", key)
-
-            hset_result = redis_client.hset(
-                key,
-                mapping=transaction_data
-            )
-
-            print("REDIS HSET SUCCESS:", hset_result)
-
-            stored_data = redis_client.hgetall(key)
-
-            print("REDIS STORED DATA:", stored_data)
-
-        except Exception as e:
-            print("REDIS FAILURE:", type(e).__name__, str(e))
-
-            return {
-                "status": "Error",
-                "Error": f"Redis storage failed: {str(e)}"
-            }
+        redis_client.hset(f"transaction: {thread_id}",mapping=transaction_data)
+    
 
     image_bytes = await document.read()
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
