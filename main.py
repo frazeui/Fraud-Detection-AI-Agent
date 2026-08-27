@@ -335,15 +335,34 @@ async def analyze_transactions_with_documents(
 ):
     start = time.time() 
     try:
+        transaction_data = extract_transaction_data(description)
+        print("EXTRACTED DATA:", transaction_data)
 
-        transaction_data=extract_transaction_data(description)
-        
-        if transaction_data:
-            redis_client.hset(f"transaction: {thread_id}",mapping=transaction_data)
     except Exception as e:
         return {
-            "status":"Error",
-            "Error ":f"Transaction extraction failed: {str(e)}"
+            "status": "Error",
+            "error": f"Transaction extraction failed: {str(e)}"
+        }
+
+
+    try:
+        if transaction_data:
+            print("REDIS CLIENT:", redis_client)
+            print("REDIS CONFIG:", redis_client.connection_pool.connection_kwargs)
+
+            print("REDIS PING:", redis_client.ping())
+
+            redis_client.hset(
+                f"transaction:{thread_id}",
+                mapping=transaction_data
+            )
+
+            print("REDIS WRITE SUCCESS")
+
+    except Exception as e:
+        return {
+            "status": "Error",
+            "error": f"Redis storage failed: {str(e)}"
         }
 
 
