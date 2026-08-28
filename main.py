@@ -94,7 +94,7 @@ class AgentState(TypedDict):
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-llm_risk = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=3500, api_key=GROQ_API_KEY)
+llm_risk = ChatGroq(model="gpt-oss-120b", api_key=GROQ_API_KEY)
 risk_analyst_llm = llm_risk.bind_tools(risk_tools)
 decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
@@ -185,7 +185,7 @@ Rules:
 
 
 
-# @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
 def risk_analyst_node(state: AgentState):
     messages = state["messages"]
     if not any(isinstance(m, SystemMessage) for m in messages):
@@ -245,12 +245,16 @@ def document_verification_node(state: AgentState):
         )
     except Exception as e:
         print(f"[Document Verification Error] {type(e).__name__}: {e}")
-        raise
+        summary_text = (
+        "[Document Verification]\n"
+        "Automated document verification failed due to a technical issue. "
+        "This transaction requires MANUAL document review before approval."
+    )
 
     return {"messages": [AIMessage(content=summary_text)]}
 
 
-# @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
 def decision_agent_node(state: AgentState):
     risk_findings = None
     document_findings = None
@@ -333,7 +337,7 @@ class TransactionExtraction(BaseModel):
     user_id:Optional[str]=None
     amount:Optional[float]=None
     country:Optional[str]=None
-    last_hour_transaction: Optional[int]=None
+    transaction_count_last_hour: Optional[int]=None
 
 transaction_extraction_llm=llm_risk.with_structured_output(TransactionExtraction)
 
@@ -373,12 +377,13 @@ async def analyze_transactions_with_documents(
     document: UploadFile = File(...)
 ):
     start = time.time() 
-
-    transaction_data=extract_transaction_data(description)
+    try:
+        transaction_data=extract_transaction_data(description)
     
-    if transaction_data:
-        redis_client.hset(f"transaction: {thread_id}",mapping=transaction_data)
-    
+        if transaction_data:
+            redis_client.hset(f"transaction:{thread_id}",mapping=transaction_data)
+    except Exception as e:
+        print(f"Redis Error: {e}")
 
     image_bytes = await document.read()
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
