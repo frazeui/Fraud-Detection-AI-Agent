@@ -34,7 +34,6 @@ USER_PROFILES = {
 
 @tool
 def check_amount_risk(amount: float, user_id: str) -> str:
-    """Compares the transaction amount against the user's average spending."""
     profile = USER_PROFILES.get(user_id)
     if not profile:
         return "Error: User profile not found"
@@ -58,7 +57,6 @@ def check_velocity(transaction_count_last_hour: int) -> str:
 
 @tool
 def check_location_mismatch(user_id: str, transaction_country: str) -> str:
-    """Compares the transaction's origin country against the user's home country."""
     profile = USER_PROFILES.get(user_id)
     if not profile:
         return "Error: User profile not found"
@@ -96,7 +94,7 @@ class AgentState(TypedDict):
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-llm_risk = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=1500, api_key=GROQ_API_KEY)
+llm_risk = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=2500, api_key=GROQ_API_KEY)
 risk_analyst_llm = llm_risk.bind_tools(risk_tools)
 decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
@@ -119,6 +117,7 @@ Rules:
 
 DECISION_AGENT_PROMPT = """You are Decision Agent. Your job is to review the Risk Analyst's
 findings and respond with a JSON object with exactly these three fields: overall_risk, recommendation, justification.
+"Keep the justification concise - 2-3 sentences maximum."
 
 overall_risk must be one of: LOW, MEDIUM, HIGH
 recommendation must be one of: APPROVE, REVIEW, BLOCK
