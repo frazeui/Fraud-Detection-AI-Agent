@@ -290,6 +290,7 @@ class HumanDecisionRequest(BaseModel):
     decision: str
 
 class TransactionExtraction(BaseModel):
+    user_id:Optional[str]=None
     amount:Optional[float]=None
     country:Optional[str]=None
     last_hour_transaction: Optional[int]=None
