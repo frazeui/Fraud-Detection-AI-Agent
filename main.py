@@ -204,16 +204,27 @@ def should_continue_risk_analysis(state: AgentState):
     return "document_verification"
 
 
+import re
+
 def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
     message = HumanMessage(content=[
         {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ])
-    response=llm_vision.invoke([message])
-    print(repr(response.content))
-    print(type(response.content))
-    data=json.loads(response.content)
+    response = llm_vision.invoke([message])
+    raw_text = response.content
+    
+    raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL)
 
+    json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+    if json_match:
+        raw_text = json_match.group(0)
+    else:
+        raise ValueError(f"No JSON object found in response: {raw_text[:200]}")
+
+    print(f"[Debug] Cleaned JSON: {raw_text[:200]}")
+
+    data = json.loads(raw_text)
     return Document_Extraction_Result.model_validate(data)
 
 def document_verification_node(state: AgentState):
