@@ -32,7 +32,7 @@ USER_PROFILES = {
 }
 
 
-@tool
+@tool(description="check the transaction amount that either it's in normal range or not ")
 def check_amount_risk(amount: float, user_id: str) -> str:
     profile = USER_PROFILES.get(user_id)
     if not profile:
@@ -55,7 +55,7 @@ def check_velocity(transaction_count_last_hour: int) -> str:
     return f"LOW RISK: {transaction_count_last_hour} transaction(s) in the last hour - normal"
 
 
-@tool
+@tool(description="check the location of the transaction against the user's home country")
 def check_location_mismatch(user_id: str, transaction_country: str) -> str:
     profile = USER_PROFILES.get(user_id)
     if not profile:
