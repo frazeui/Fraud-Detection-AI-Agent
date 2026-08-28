@@ -81,7 +81,7 @@ class Document_Extraction_Result(BaseModel):
     id_number: Optional[str] = Field(default=None, description="ID/document number, if visible")
     date_of_birth: Optional[str] = Field(default=None, description="Date of birth, if visible")
     appears_authentic: Literal["yes", "no"] = Field(description="Overall authenticity assessment")
-    red_flags: list[str] = Field(default_factory=list,description="Specific visual red flags found, if any. Empty list if none.")
+    red_flags: list[str] = Field(default_factory=list,description="Signs of any digital editing or tampering, if any")
     font_consistency: Literal["consistent", "inconsistent", "cannot_determine"] = Field(description="Whether fonts/styles appear consistent")
     tampering_indicators: list[str] = Field(description="Signs of digital editing or tampering, if any")
     confidence_level: Literal["Low", "Medium", "High"] = Field(description="Confidence in this assessment")
@@ -100,7 +100,7 @@ decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
 llm_vision = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=5000, api_key=GROQ_API_KEY)
-
+document_verification_llm=llm_vision.with_structured_output(Document_Extraction_Result)
 
 
 RISK_ANALYST_PROMPT = """You are a Risk Analyst Agent. Your only job is to run risk checks
@@ -150,39 +150,32 @@ Additional Rules:
 DOCUMENT_VERIFICATION_PROMPT = """
 Examine the provided document image.
 
-Return ONLY one valid JSON object.
-Do not return markdown.
-Do not use ```json.
-Do not write explanations before or after the JSON.
+Extract the actual information visible in the document.
 
-The JSON must contain exactly these fields:
-
-{
-  "document_type": "string",
-  "name": "string or null",
-  "id_number": "string or null",
-  "date_of_birth": "string or null",
-  "appears_authentic": "yes",
-  "red_flags": [],
-  "font_consistency": "consistent",
-  "tampering_indicators": [],
-  "confidence_level": "High"
-}
+Return the result using the required structured schema.
 
 Rules:
-- red_flags must be a JSON array of strings.
-- Maximum 2 red_flags.
-- Each red_flag must contain fewer than 10 words.
-- tampering_indicators must be a JSON array of strings.
-- Maximum 2 tampering_indicators.
-- Each tampering_indicator must contain fewer than 10 words.
-- If there are no red flags, return [].
-- If there are no tampering indicators, return [].
-- Never put an array inside a string.
-- Use null when a field is not visible.
-- Return valid JSON only.
-"""
 
+- document_type: identify the actual document type.
+- name: extract the actual visible name, otherwise null.
+- id_number: extract the actual visible document number, otherwise null.
+- date_of_birth: extract the actual visible date of birth, otherwise null.
+- appears_authentic: choose "yes" or "no".
+- red_flags: list up to 2 specific visual red flags.
+- font_consistency: choose "consistent", "inconsistent", or "cannot_determine".
+- tampering_indicators: list up to 2 specific signs of editing or tampering.
+- confidence_level: choose "Low", "Medium", or "High".
+
+Important:
+
+- Use actual values from the image.
+- Never output placeholder values such as "string", "string or null", or "example".
+- red_flags must be a list of strings.
+- tampering_indicators must be a list of strings.
+- If there are no red flags, return an empty list.
+- If there are no tampering indicators, return an empty list.
+- Do not invent information that cannot be seen.
+"""
 
 
 @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
@@ -211,21 +204,10 @@ def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
         {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ])
-    response = llm_vision.invoke([message])
-    raw_text = response.content
-    
-    raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL)
+    result:Document_Extraction_Result=document_verification_llm.invoke([message])
 
-    json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-    if json_match:
-        raw_text = json_match.group(0)
-    else:
-        raise ValueError(f"No JSON object found in response: {raw_text[:200]}")
-
-    print(f"[Debug] Cleaned JSON: {raw_text[:200]}")
-
-    data = json.loads(raw_text)
-    return Document_Extraction_Result.model_validate(data)
+    print(result.model_dump())
+    return result
 
 def document_verification_node(state: AgentState):
     base64_image = state.get("document_image")
