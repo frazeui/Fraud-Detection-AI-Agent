@@ -94,7 +94,7 @@ class AgentState(TypedDict):
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-llm_risk = ChatGroq(model="gpt-oss-120b", api_key=GROQ_API_KEY)
+llm_risk = ChatGroq(model="qwen/qwen3.6-27b", api_key=GROQ_API_KEY)
 risk_analyst_llm = llm_risk.bind_tools(risk_tools)
 decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
