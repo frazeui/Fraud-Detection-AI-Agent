@@ -303,6 +303,7 @@ Extract transaction information from the user's description.
 Extract only information that is explicitly present.
 
 Fields:
+-user_id
 - amount
 - last_hour_transaction | velocity
 - country
