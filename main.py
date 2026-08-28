@@ -147,14 +147,41 @@ Additional Rules:
 2. When referencing the amount finding, use the exact multiplier format (e.g., '4.0x higher'), never percentage.
 3. Use exactly these field names: overall_risk, recommendation, justification."""
 
-DOCUMENT_VERIFICATION_PROMPT = """Examine this document for authenticity. Provide ONLY:
-- document_type, name, id_number, date_of_birth (brief values)
-- appears_authentic (yes/no)
-- font_consistency
-- confidence_level
-- red_flags: LIST MAX 2 ITEMS ONLY, each under 10 words
-- tampering_indicators: LIST MAX 2 ITEMS ONLY, each under 10 words
-Be extremely brief. Do not write long explanations."""
+DOCUMENT_VERIFICATION_PROMPT = """
+Examine the provided document image.
+
+Return ONLY one valid JSON object.
+Do not return markdown.
+Do not use ```json.
+Do not write explanations before or after the JSON.
+
+The JSON must contain exactly these fields:
+
+{
+  "document_type": "string",
+  "name": "string or null",
+  "id_number": "string or null",
+  "date_of_birth": "string or null",
+  "appears_authentic": "yes",
+  "red_flags": [],
+  "font_consistency": "consistent",
+  "tampering_indicators": [],
+  "confidence_level": "High"
+}
+
+Rules:
+- red_flags must be a JSON array of strings.
+- Maximum 2 red_flags.
+- Each red_flag must contain fewer than 10 words.
+- tampering_indicators must be a JSON array of strings.
+- Maximum 2 tampering_indicators.
+- Each tampering_indicator must contain fewer than 10 words.
+- If there are no red flags, return [].
+- If there are no tampering indicators, return [].
+- Never put an array inside a string.
+- Use null when a field is not visible.
+- Return valid JSON only.
+"""
 
 
 
@@ -183,6 +210,8 @@ def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ])
     response=llm_vision.invoke([message])
+    print(repr(response.content))
+    print(type(respnse.content))
     data=json.loads(response.content)
 
     return Document_Extraction_Result.model_validate(data)
