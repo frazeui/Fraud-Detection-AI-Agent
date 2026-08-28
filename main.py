@@ -211,7 +211,7 @@ def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
     ])
     response=llm_vision.invoke([message])
     print(repr(response.content))
-    print(type(respnse.content))
+    print(type(respnose.content))
     data=json.loads(response.content)
 
     return Document_Extraction_Result.model_validate(data)
