@@ -158,7 +158,7 @@ Be extremely brief. Do not write long explanations."""
 
 
 
-@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+# @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
 def risk_analyst_node(state: AgentState):
     messages = state["messages"]
     if not any(isinstance(m, SystemMessage) for m in messages):
@@ -205,16 +205,12 @@ def document_verification_node(state: AgentState):
         )
     except Exception as e:
         print(f"[Document Verification Error] {type(e).__name__}: {e}")
-        summary_text = (
-            "[Document Verification]\n"
-            "Automated document verification failed due to a technical issue. "
-            "This transaction requires MANUAL document review before approval."
-        )
+        raise
 
     return {"messages": [AIMessage(content=summary_text)]}
 
 
-@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+# @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
 def decision_agent_node(state: AgentState):
     risk_findings = None
     document_findings = None
