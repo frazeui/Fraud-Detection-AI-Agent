@@ -21,15 +21,18 @@ from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
 from redis_client import redis_client
 import json
+from langsmith import Client
 
-
-os.environ["LANGSMITH_TRACING"] = "true"
-os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
-os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
+# os.environ["LANGSMITH_TRACING"] = "true"
+# os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
+# os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
 
 
 
 load_dotenv()  
+
+
+client=Client(api_key=os.environ["LANGSMITH_API_KEY"],project_name=os.environ["LANGSMITH_PROJECT"])
 
 USER_PROFILES = {
     "user_101": {"home_country": "UAE", "avg_transaction": 500},
