@@ -36,12 +36,6 @@ load_dotenv()
 # client=Client(api_key=os.environ["LANGSMITH_API_KEY"],project_name=os.environ["LANGSMITH_PROJECT"])
 
 
-print("========== LANGSMITH CONFIG ==========")
-print("TRACING:", os.getenv("LANGSMITH_TRACING"))
-print("PROJECT:", os.getenv("LANGSMITH_PROJECT"))
-print("API KEY EXISTS:", bool(os.getenv("LANGSMITH_API_KEY")))
-print("======================================")
-
 USER_PROFILES = {
     "user_101": {"home_country": "UAE", "avg_transaction": 500},
     "user_102": {"home_country": "Pakistan", "avg_transaction": 200},
@@ -388,7 +382,15 @@ async def analyze_transactions_with_documents(
 
     config = {"configurable": {"thread_id": thread_id}}
 
+    
+    print("========== LANGSMITH CONFIG ==========")
+    print("TRACING:", os.getenv("LANGSMITH_TRACING"))
+    print("PROJECT:", os.getenv("LANGSMITH_PROJECT"))
+    print("API KEY EXISTS:", bool(os.getenv("LANGSMITH_API_KEY")))
+    print("======================================")
+
     try:
+        
         with ls.tracing_context(project_name=os.environ.get("LANGSMITH_PROJECT"), api_key=os.environ.get("LANGSMITH_API_KEY"),enabled=True):
                 
             result = fraud_agent_app.invoke({
