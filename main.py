@@ -22,6 +22,7 @@ from fastapi import FastAPI, Form, UploadFile, File
 from redis_client import redis_client
 import json
 from langsmith import Client
+import langsmith as ls
 
 # os.environ["LANGSMITH_TRACING"] = "true"
 # os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
@@ -32,7 +33,14 @@ from langsmith import Client
 load_dotenv()  
 
 
-client=Client(api_key=os.environ["LANGSMITH_API_KEY"],project_name=os.environ["LANGSMITH_PROJECT"])
+# client=Client(api_key=os.environ["LANGSMITH_API_KEY"],project_name=os.environ["LANGSMITH_PROJECT"])
+
+
+print("========== LANGSMITH CONFIG ==========")
+print("TRACING:", os.getenv("LANGSMITH_TRACING"))
+print("PROJECT:", os.getenv("LANGSMITH_PROJECT"))
+print("API KEY EXISTS:", bool(os.getenv("LANGSMITH_API_KEY")))
+print("======================================")
 
 USER_PROFILES = {
     "user_101": {"home_country": "UAE", "avg_transaction": 500},
@@ -381,10 +389,12 @@ async def analyze_transactions_with_documents(
     config = {"configurable": {"thread_id": thread_id}}
 
     try:
-        result = fraud_agent_app.invoke({
-            "messages": [HumanMessage(content=description)],
-            "document_image": base64_image
-        }, config=config)
+        with ls.tracing_context(project_name=os.environ.get("LANGSMITH_PROJECT"), api_key=os.environ.get("LANGSMITH_API_KEY"),enabled=True):
+                
+            result = fraud_agent_app.invoke({
+                "messages": [HumanMessage(content=description)],
+                "document_image": base64_image
+            }, config=config)
     except Exception as e:
         return {"status": "Error", "error": str(e)}
 
