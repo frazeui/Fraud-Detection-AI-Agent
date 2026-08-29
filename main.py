@@ -23,6 +23,11 @@ from redis_client import redis_client
 import json
 
 
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
+os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
+
+
 
 load_dotenv()  
 
