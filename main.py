@@ -252,7 +252,7 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     ]}]
     response=None
     try:
-        response=call_openrouter(model="openrouter/free",messages=message,response_format={"type":"json_object"}
+        response=call_openrouter(model="openrouter/free",messages=message
         )
 
     except Exception as e: 
@@ -266,14 +266,14 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     if not response or not response.choices:
         return None
 
-    content=response.choices[0].message.content
+    content=response.choices[0]["message"]["content"]
     cleaned_content=re.sub(r"```json\s*|\s*```","",content).strip()
     try:
         parsed=json.loads(cleaned_content)
     except json.JSONDecodeError :
         print(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
         return None
-    return Document_Extraction_Result.model_validate(json.loads(cleaned_content))
+    return Document_Extraction_Result.model_validate(parsed)
 
 def extract_document_fields_deep_reasoning(base64_image: str) -> Document_Extraction_Result:
     message = HumanMessage(content=[
