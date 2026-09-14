@@ -5,6 +5,8 @@ import re
 import time
 import base64
 from dotenv import load_dotenv
+load_dotenv()  
+
 from typing import Annotated, TypedDict, Optional, Literal
 
 from pydantic import BaseModel, Field
@@ -20,20 +22,19 @@ import sqlite3
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
 from redis_client import redis_client
-import json
+from openai import OpenAI
 from langsmith import Client
 import langsmith as ls
 
-# os.environ["LANGSMITH_TRACING"] = "true"
-# os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
-# os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
+os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
 
 
 
-load_dotenv()  
 
 
-# client=Client(api_key=os.environ["LANGSMITH_API_KEY"],project_name=os.environ["LANGSMITH_PROJECT"])
+client=Client(api_key=os.environ["LANGSMITH_API_KEY"])
 
 
 USER_PROFILES = {
@@ -97,6 +98,7 @@ class Document_Extraction_Result(BaseModel):
     confidence_level: Literal["Low", "Medium", "High"] = Field(description="Confidence in this assessment")
 
 
+
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     document_image: Optional[str]
@@ -109,6 +111,11 @@ risk_analyst_llm = llm_risk.bind_tools(risk_tools)
 decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
+#Lighter weight vision models for document verification
+openai_client=OpenAI(api_key=os.environ.get("OPEN_ROUTER_API_KEY"),base_url="https://openrouter.ai/api/v1")
+
+
+#deep weight vision model for document verification
 llm_vision = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=5000, api_key=GROQ_API_KEY)
 document_verification_llm=llm_vision.with_structured_output(Document_Extraction_Result)
 
@@ -187,6 +194,19 @@ Important:
 - Do not invent information that cannot be seen.
 """
 
+LIGHTWEIGHT_VISION_PROMPT = """Analyze this document quickly. Return strictly a JSON object matching this schema:
+{
+    "document_type": "Passport/Driver License/Bank Statement/Unknown",
+    "name": "Full Name or null",
+    "id_number": "ID Number or null",
+    "date_of_birth": "YYYY-MM-DD or null",
+    "appears_authentic": "yes" or "no",
+    "red_flags": ["flag 1", "flag 2"],
+    "font_consistency": "consistent", "inconsistent", or "cannot_determine",
+    "tampering_indicators": ["indicator 1"],
+    "confidence_level": "Low", "Medium", or "High"
+}"""
+
 
 @retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
 def risk_analyst_node(state: AgentState):
@@ -208,17 +228,54 @@ def should_continue_risk_analysis(state: AgentState):
 
 
 import re
+import json
 
-def extract_document_fields(base64_image: str) -> Document_Extraction_Result:
+def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_Result:
+    message=[{
+        "role":"user",
+        "content":[
+        {"type":"text","text":LIGHTWEIGHT_VISION_PROMPT},
+        {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{base64_image}"}}
+    ]}]
+    response=None
+    try:
+        response=openai_client.chat.completions.create(model="openrouter/free",messages=message,response_format={"type":"json_object"}
+        )
+
+    except Exception as e: 
+        print(f"[Lightweight Vision] Fallback model failed: {e}")
+        try:
+            response=openai_client.chat.completions.create(model="google/gemma-4-31b-it:free",messages=message,response_format={"type":"json_object"}
+                )
+        except Exception as e:
+            print(f"[Lightweight Vision] Fallback model failed: {e}")
+            return None
+
+    if not response or not response.choices:
+        return None
+
+    content=response.choices[0].message.content
+    cleaned_content=re.sub(r"```json\s*|\s*```","",content).strip()
+    try:
+        parsed=json.loads(cleaned_content)
+    except json.JSONDecodeError :
+        print(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
+        return None
+    return Document_Extraction_Result.model_validate(json.loads(cleaned_content))
+
+def extract_document_fields_deep_reasoning(base64_image: str) -> Document_Extraction_Result:
     message = HumanMessage(content=[
         {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ])
-    result:Document_Extraction_Result=document_verification_llm.invoke([message])
+    try:
+        result:Document_Extraction_Result=document_verification_llm.invoke([message])
+        return result if isinstance(result, Document_Extraction_Result) else Document_Extraction_Result.model_validate(result)
 
-    print(result.model_dump())
-    return result
-
+    except Exception as e:
+        print(f"[Deep Reasoning Vision] Model failed: {e}")
+        return None
+    
 def document_verification_node(state: AgentState):
     base64_image = state.get("document_image")
 
@@ -226,22 +283,35 @@ def document_verification_node(state: AgentState):
         return {"messages": [AIMessage(content="[Document Verification] No document provided - skipping document check.")]}
 
     try:
-        extraction = extract_document_fields(base64_image=base64_image)
-        summary_text = (
-            f"[Document Verification]\n"
-            f"Document Type: {extraction.document_type}\n"
-            f"Appears Authentic: {extraction.appears_authentic}\n"
-            f"Red Flags: {extraction.red_flags}\n"
-            f"Font Consistency: {extraction.font_consistency}\n"
-            f"Confidence Level: {extraction.confidence_level}"
-        )
+        extraction = extract_document_fields_lightweight(base64_image=base64_image)
+
+        if not extraction:
+            summary_text = (
+                "[Document Verification]\n"
+                "No extraction result available. Manual review required."
+            )
+        else:
+                
+            if extraction.confidence_level=="Low" or extraction.appears_authentic in ["no",False]:
+                print(f"[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model...")
+                extraction=extract_document_fields_deep_reasoning(base64_image=base64_image)
+            
+            summary_text = (
+                    f"[Document Verification]\n"
+                    f"Document Type: {getattr(extraction, 'document_type', 'N/A')}\n"
+                    f"Appears Authentic: {getattr(extraction, 'appears_authentic', 'N/A')}\n"
+                    f"Red Flags: {getattr(extraction, 'red_flags', 'N/A')}\n"
+                    f"Font Consistency: {getattr(extraction, 'font_consistency', 'N/A')}\n"
+                    f"Confidence Level: {getattr(extraction, 'confidence_level', 'N/A')}"
+                )
+            
     except Exception as e:
-        print(f"[Document Verification Error] {type(e).__name__}: {e}")
-        summary_text = (
-        "[Document Verification]\n"
-        "Automated document verification failed due to a technical issue. "
-        "This transaction requires MANUAL document review before approval."
-    )
+            print(f"[Document Verification Error] {type(e).__name__}: {e}")
+            summary_text = (
+            "[Document Verification]\n"
+            "Automated document verification failed due to a technical issue. "
+            "This transaction requires MANUAL document review before approval."
+        )
 
     return {"messages": [AIMessage(content=summary_text)]}
 
@@ -341,7 +411,7 @@ Extract only information that is explicitly present.
 Fields:
 -user_id
 - amount
-- last_hour_transaction | velocity
+- transaction_count_last_hour
 - country
 
 
@@ -366,19 +436,32 @@ def extract_transaction_data(description:str)->str:
 async def analyze_transactions_with_documents(
     thread_id: str = Form(...),
     description: str = Form(...),
-    document: UploadFile = File(...)
+    document: UploadFile |None = File(None)
 ):
     start = time.time() 
+
     try:
         transaction_data=extract_transaction_data(description)
     
         if transaction_data:
-            redis_client.hset(f"transaction:{thread_id}",mapping=transaction_data)
+            redis_mapping={k:str(v) for k,v in transaction_data.items()}
+            redis_client.hset(f"transaction:{thread_id}",mapping=redis_mapping)
     except Exception as e:
         print(f"Redis Error: {e}")
 
-    image_bytes = await document.read()
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    if not document:
+        print(f"[Document Verification] No doument uploaded - skipping")
+    base64_image = None
+    if document: 
+        max_file_size_mb = 5
+        image_bytes = await document.read()
+        if len(image_bytes)>max_file_size_mb * 1024 * 1024:
+            return {
+                "status": "ERROR",
+                "message": f"Document file size exceeds {max_file_size_mb} MB limit."
+            }
+
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
 
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -389,17 +472,12 @@ async def analyze_transactions_with_documents(
     print("API KEY EXISTS:", bool(os.getenv("LANGSMITH_API_KEY")))
     print("======================================")
 
-    try:
-        
-        with ls.tracing_context(project_name=os.environ.get("LANGSMITH_PROJECT"), api_key=os.environ.get("LANGSMITH_API_KEY"),enabled=True):
                 
-            result = fraud_agent_app.invoke({
+    result = fraud_agent_app.invoke({
                 "messages": [HumanMessage(content=description)],
                 "document_image": base64_image
             }, config=config)
-    except Exception as e:
-        return {"status": "Error", "error": str(e)}
-
+    
     if "__interrupt__" in result:
         interrupt_data = result["__interrupt__"][0].value
         return {
