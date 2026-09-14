@@ -112,8 +112,21 @@ decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
 #Lighter weight vision models for document verification
-openai_client=OpenAI(api_key=os.environ.get("OPEN_ROUTER_API_KEY"),base_url="https://openrouter.ai/api/v1")
+import os, requests
 
+OPENROUTER_API_KEY = os.environ.get("OPEN_ROUTER_API_KEY")
+
+def call_openrouter(messages, model="openrouter/free"):
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+        json={
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_object"}
+        }
+    )
+    return response.json()
 
 #deep weight vision model for document verification
 llm_vision = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=5000, api_key=GROQ_API_KEY)
@@ -239,14 +252,13 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     ]}]
     response=None
     try:
-        response=openai_client.chat.completions.create(model="openrouter/free",messages=message,response_format={"type":"json_object"}
+        response=call_openrouter(model="openrouter/free",messages=message,response_format={"type":"json_object"}
         )
 
     except Exception as e: 
         print(f"[Lightweight Vision] Fallback model failed: {e}")
         try:
-            response=openai_client.chat.completions.create(model="google/gemma-4-31b-it:free",messages=message,response_format={"type":"json_object"}
-                )
+            response=call_openrouter(messages=message, model="google/gemma-4-31b-it:free")
         except Exception as e:
             print(f"[Lightweight Vision] Fallback model failed: {e}")
             return None
