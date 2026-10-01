@@ -4,6 +4,7 @@ import os
 import re
 import time
 import base64
+import logging
 from dotenv import load_dotenv
 load_dotenv()  
 
@@ -31,7 +32,7 @@ os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
 os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
 
 
-
+logging.basicConfig(level=logging.INFO)
 
 
 client=Client(api_key=os.environ["LANGSMITH_API_KEY"])
@@ -479,17 +480,18 @@ async def analyze_transactions_with_documents(
     start = time.time() 
 
     try:
+        logging.info("Extracting transaction data...")
         transaction_data=extract_transaction_data(description)
-        print("DEBUG:", type(transaction_data), transaction_data)
+        logging.info("DEBUG:", type(transaction_data), transaction_data)
     
         if transaction_data:
             redis_mapping={k:str(v) for k,v in transaction_data.items()}
             redis_client.hset(f"transaction:{thread_id}",mapping=redis_mapping)
     except Exception as e:
-        print(f"Redis Error: {e}")
+        logging.error(f"Redis Error: {e}")
 
     if not document:
-        print(f"[Document Verification] No doument uploaded - skipping")
+        logging.info(f"[Document Verification] No document uploaded - skipping")
     base64_image = None
     if document: 
         max_file_size_mb = 5
