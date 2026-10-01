@@ -20,6 +20,7 @@ from langgraph.types import interrupt, Command
 from langgraph.checkpoint.redis import RedisSaver
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
+from fastapi.staticfiles import StaticFiles
 from redis_client import client as redis_client
 from openai import OpenAI
 from langsmith import Client
@@ -426,6 +427,8 @@ fraud_agent_app = graph.compile(checkpointer=memory)
 
 app = FastAPI(title="Fraud Detection Agent v3")
 
+
+app.mount("/static",StaticFiles(directory="static"),name="static")
 
 class HumanDecisionRequest(BaseModel):
     thread_id: str
