@@ -10,18 +10,17 @@ load_dotenv()
 from typing import Annotated, TypedDict, Optional, Literal
 
 from pydantic import BaseModel, Field
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
-from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
+from langgraph.checkpoint.redis import RedisSaver
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from fastapi import FastAPI, Form, UploadFile, File
-from redis_client import redis_client
+from redis_client import client as redis_client
 from openai import OpenAI
 from langsmith import Client
 import langsmith as ls
@@ -79,6 +78,17 @@ def check_location_mismatch(user_id: str, transaction_country: str) -> str:
 
 risk_tools = [check_amount_risk, check_velocity, check_location_mismatch]
 
+from concurrent.futures import ThreadPoolExecutor
+
+def run_risk_tools_parallel(user_id: str, amount: float, transaction_count_last_hour: int, country: str):
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(check_amount_risk, amount, user_id),
+            executor.submit(check_velocity, transaction_count_last_hour),
+            executor.submit(check_location_mismatch, user_id, country),
+        ]
+        return [f.result() for f in futures]
+
 
 class Risk_Assessment(BaseModel):
     overall_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(description="Overall risk classification")
@@ -98,6 +108,32 @@ class Document_Extraction_Result(BaseModel):
     confidence_level: Literal["Low", "Medium", "High"] = Field(description="Confidence in this assessment")
 
 
+from langchain_core.language_models import BaseChatModel
+from langchain_core.outputs import ChatResult,ChatGeneration
+
+class OpenRouterLLM(BaseChatModel):
+    client:object
+    model:str
+
+    def _llm_type(self) -> str:
+        return "openrouter"
+
+    def _identifying_params(self) -> dict:
+        return {"model": self.model}
+
+    def _generate(self,messages,stop=None,run_manager=None,**kwargs):
+        response=self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role":getattr(m,"role","user"),"content":m.content} for m in messages],
+            **kwargs
+        )
+        content=response.choices[0].message.content
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+    def bind_tools(self, tools: list[BaseTool],**kwargs):
+        """
+        this is the function that binds the tools to the llm and returns a new llm instance with the tools bound
+        """
+        return self
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -106,30 +142,21 @@ class AgentState(TypedDict):
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-llm_risk = ChatGroq(model="qwen/qwen3.6-27b", api_key=GROQ_API_KEY)
+#Lighter weight vision models for document verification
+
+
+OPENROUTER_API_KEY = os.environ.get("OPEN_ROUTER_API_KEY")
+
+openrouter_client=OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+
+
+llm_risk =OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct")
 risk_analyst_llm = llm_risk.bind_tools(risk_tools)
 decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
-#Lighter weight vision models for document verification
-import os, requests
-
-OPENROUTER_API_KEY = os.environ.get("OPEN_ROUTER_API_KEY")
-
-def call_openrouter(messages, model="openrouter/free"):
-    response = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-        json={
-            "model": model,
-            "messages": messages,
-            "response_format": {"type": "json_object"}
-        }
-    )
-    return response.json()
-
 #deep weight vision model for document verification
-llm_vision = ChatGroq(model="qwen/qwen3.6-27b", max_tokens=5000, api_key=GROQ_API_KEY)
+llm_vision =ChatGroq(model="qwen3.6-27b",api_key=GROQ_API_KEY)
 document_verification_llm=llm_vision.with_structured_output(Document_Extraction_Result)
 
 
@@ -221,7 +248,7 @@ LIGHTWEIGHT_VISION_PROMPT = """Analyze this document quickly. Return strictly a 
 }"""
 
 
-@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+@retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def risk_analyst_node(state: AgentState):
     messages = state["messages"]
     if not any(isinstance(m, SystemMessage) for m in messages):
@@ -252,21 +279,20 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     ]}]
     response=None
     try:
-        response=call_openrouter(model="openrouter/free",messages=message
-        )
+        response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke(messages=[HumanMessage(content=message)])
 
     except Exception as e: 
         print(f"[Lightweight Vision] Fallback model failed: {e}")
         try:
-            response=call_openrouter(messages=message, model="google/gemma-4-31b-it:free")
+            response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke(messages=[HumanMessage(content=message)])
         except Exception as e:
             print(f"[Lightweight Vision] Fallback model failed: {e}")
             return None
 
-    if not response or not response.choices:
+    if not response or not response.content:
         return None
 
-    content=response.choices[0]["message"]["content"]
+    content=response.content
     cleaned_content=re.sub(r"```json\s*|\s*```","",content).strip()
     try:
         parsed=json.loads(cleaned_content)
@@ -328,7 +354,7 @@ def document_verification_node(state: AgentState):
     return {"messages": [AIMessage(content=summary_text)]}
 
 
-@retry(wait=wait_random_exponential(min=5, max=30), stop=stop_after_attempt(5))
+@retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def decision_agent_node(state: AgentState):
     risk_findings = None
     document_findings = None
@@ -393,14 +419,12 @@ graph.add_edge("decision_agent", "human_review")
 graph.add_edge("human_review", END)
 
 
-DB_PATH = os.environ.get("DB_PATH", "fraud_agent_memory.db")
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-memory = SqliteSaver(conn)
+memory = RedisSaver(redis_client=redis_client, ttl=3600)
 fraud_agent_app = graph.compile(checkpointer=memory)
 
 
 
-api = FastAPI(title="Fraud Detection Agent v3")
+app = FastAPI(title="Fraud Detection Agent v3")
 
 
 class HumanDecisionRequest(BaseModel):
@@ -444,7 +468,7 @@ def extract_transaction_data(description:str)->str:
 
 
 
-@api.post("/analyze_transactions_with_documents")
+@app.post("/analyze_transactions_with_documents")
 async def analyze_transactions_with_documents(
     thread_id: str = Form(...),
     description: str = Form(...),
@@ -466,12 +490,19 @@ async def analyze_transactions_with_documents(
     base64_image = None
     if document: 
         max_file_size_mb = 5
-        image_bytes = await document.read()
-        if len(image_bytes)>max_file_size_mb * 1024 * 1024:
-            return {
-                "status": "ERROR",
-                "message": f"Document file size exceeds {max_file_size_mb} MB limit."
-            }
+        size=0
+        chunks=[]
+        async for chunk in document.stream():
+            size+=len(chunk)
+            if size>max_file_size_mb * 1024 * 1024:
+                return {
+                    "status":"ERROR",
+                    "message":f"Document file size exceeds {max_file_size_mb} MB limit."
+                }
+            chunks.append(chunk)
+
+        image_bytes = b"".join(chunks)
+       
 
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
 
@@ -508,7 +539,7 @@ async def analyze_transactions_with_documents(
     }
 
 
-@api.post("/human_decision")
+@app.post("/human_decision")
 def human_decision(req: HumanDecisionRequest):
     config = {"configurable": {"thread_id": req.thread_id}}
     result = fraud_agent_app.invoke(Command(resume=req.decision), config=config)
@@ -519,6 +550,6 @@ def human_decision(req: HumanDecisionRequest):
     }
 
 
-@api.get("/")
+@app.get("/")
 def health_check():
     return {"status": "Fraud Detection Agent v3 API is running"}

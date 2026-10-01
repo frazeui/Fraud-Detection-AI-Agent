@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 langgraph
 langchain-groq
-langgraph-checkpoint-sqlite
+langgraph-checkpoint-redis
 tenacity
 pydantic
 python-multipart
