@@ -465,9 +465,8 @@ def extract_transaction_data(description:str)->dict:
     ]
     result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
 
-    data=result.model_dump(exclude_none=True)
+    return result.model_dump(exclude_none=True)
 
-    return data
 
 
 
@@ -481,6 +480,7 @@ async def analyze_transactions_with_documents(
 
     try:
         transaction_data=extract_transaction_data(description)
+        print("DEBUG:", type(transaction_data), transaction_data)
     
         if transaction_data:
             redis_mapping={k:str(v) for k,v in transaction_data.items()}
