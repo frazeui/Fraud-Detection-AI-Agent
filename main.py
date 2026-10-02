@@ -144,7 +144,7 @@ class OpenRouterLLM(BaseChatModel):
         content=response.choices[0].message.content
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
     
-    @property
+    
     def bind_tools(self, tools: list[BaseTool],**kwargs):
         """
         this is the function that binds the tools to the llm and returns a new llm instance with the tools bound
