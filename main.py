@@ -207,7 +207,9 @@ Recommendation mapping: LOW->APPROVE, MEDIUM->REVIEW, HIGH->BLOCK
 Additional Rules:
 1. Justification must reference the specific findings from the Risk Analyst - never invent new data.
 2. When referencing the amount finding, use the exact multiplier format (e.g., '4.0x higher'), never percentage.
-3. Use exactly these field names: overall_risk, recommendation, justification."""
+3. Use exactly these field names: overall_risk, recommendation, justification.
+But Respond with a valid JSON Object:
+like {{"overall_risk": "...", "recommendation": "...", "justification": "..."}}"""
 
 DOCUMENT_VERIFICATION_PROMPT = """
 Examine the provided document image.
@@ -380,6 +382,16 @@ def decision_agent_node(state: AgentState):
         ))
     ]
     structure_result: Risk_Assessment = structured_decision_llm.invoke(decision_input)
+    raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
+    try:
+        parsed = json.loads(raw_text)
+        structure_result = Risk_Assessment.model_validate(parsed)
+    except (json.JSONDecodeError, Exception) as e:
+        logging.error(f"Decision agent parse failed: {raw_text} | {e}")
+        structure_result = Risk_Assessment(
+            overall_risk="HIGH", recommendation="BLOCK",
+            justification="Automated parsing failed — manual review required."
+        )
     formatted_text = (
         f"Overall Risk: {structure_result.overall_risk}\n"
         f"Recommendation: {structure_result.recommendation}\n"
@@ -459,17 +471,28 @@ Fields:
 
 
 If a field is not present, return null.
+But respond with a valid JSON object containing all fields, even if some are null.
+like:{{'user_id':'...','amount':'...','transaction_count_last_hour':'...','country':'...'}}
 """
 
 
-def extract_transaction_data(description:str)->str:
+def extract_transaction_data(description:str)->dict:
     messages=[
         SystemMessage(content=TRANSACTION_EXTRACTION_PROMPT),
         HumanMessage(content=description)
     ]
     result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
+    raw_text=result.content.strip()
 
-    return result.model_dump(exclude_none=True)
+    cleaned=re.sub(r"```json\s*|\s*```","",raw_text).strip()
+    try:
+        parsed=json.loads(cleaned)
+
+    except json.JSONDecodeError:
+        logging.error(f"[Transaction Extraction] JSON parsing failed. Raw content: {cleaned}")
+        return None
+
+    return {k: v for k,v in parsed.items() if v is not None and v != "null" and v != ""}
 
 
 
