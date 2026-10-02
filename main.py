@@ -508,9 +508,9 @@ async def analyze_transactions_with_documents(
     try:
         logging.info("Extracting transaction data...")
         transaction_data=extract_transaction_data(description)
-        logging.info("DEBUG:", {type(transaction_data)}, {transaction_data})
     
         if transaction_data:
+            logging.info(f"DEBUG: {type(transaction_data)} {transaction_data}")
             redis_mapping={k:str(v) for k,v in transaction_data.items()}
             redis_client.hset(f"transaction:{thread_id}",mapping=redis_mapping)
     except Exception as e:
@@ -521,19 +521,13 @@ async def analyze_transactions_with_documents(
     base64_image = None
     if document: 
         max_file_size_mb = 5
-        size=0
-        chunks=[]
-        async for chunk in document.read():
-            size+=len(chunk)
-            if size>max_file_size_mb * 1024 * 1024:
+        image_bytes=await document.read()
+        
+        if len(image_bytes)>max_file_size_mb * 1024 * 1024:
                 return {
                     "status":"ERROR",
                     "message":f"Document file size exceeds {max_file_size_mb} MB limit."
                 }
-            chunks.append(chunk)
-
-        image_bytes = b"".join(chunks)
-       
 
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
 
