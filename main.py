@@ -123,7 +123,7 @@ class OpenRouterLLM(BaseChatModel):
     def _llm_type(self) -> str:
         return "openrouter"
 
-    @property
+    
     def _identifying_params(self) -> dict:
         return {"model": self.model}
 
@@ -297,7 +297,7 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     ]}]
     response=None
     try:
-        response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke(messages=[HumanMessage(content=message)])
+        response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke([HumanMessage(content=message)])
 
     except Exception as e: 
         print(f"[Lightweight Vision] Fallback model failed: {e}")
