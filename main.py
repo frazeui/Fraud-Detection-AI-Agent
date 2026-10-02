@@ -302,7 +302,7 @@ def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_R
     except Exception as e: 
         print(f"[Lightweight Vision] Fallback model failed: {e}")
         try:
-            response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke(messages=[HumanMessage(content=message)])
+            response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke([HumanMessage(content=message)])
         except Exception as e:
             print(f"[Lightweight Vision] Fallback model failed: {e}")
             return None
@@ -486,6 +486,9 @@ def extract_transaction_data(description:str)->dict:
         HumanMessage(content=description)
     ]
     result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
+    if result is None:
+        logging.error(f"[Transaction Extraction] Failed to extract transaction data from description: {description}")
+        return {}
     return result.model_dump(exclude_none=True)
 
 
