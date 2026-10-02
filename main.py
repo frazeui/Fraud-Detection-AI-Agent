@@ -459,7 +459,7 @@ If a field is not present, return null.
 """
 
 
-def extract_transaction_data(description:str)->dict:
+def extract_transaction_data(description:str)->str:
     messages=[
         SystemMessage(content=TRANSACTION_EXTRACTION_PROMPT),
         HumanMessage(content=description)
