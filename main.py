@@ -127,9 +127,17 @@ class OpenRouterLLM(BaseChatModel):
         return {"model": self.model}
 
     def _generate(self,messages,stop=None,run_manager=None,**kwargs):
+        formatted_message=[]
+        for m in messages:
+            role=getattr(m,"role","user")
+            if isinstance(m.content,list):
+                safe_content=json.dumps(m.content)
+            else:
+                safe_content=str(m.content)
+            formatted_message.append({"role":role,"content":safe_content})
         response=self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role":getattr(m,"role","user"),"content":m.content} for m in messages],
+            messages=formatted_message,
             **kwargs
         )
         content=response.choices[0].message.content
@@ -382,16 +390,9 @@ def decision_agent_node(state: AgentState):
         ))
     ]
     structure_result: Risk_Assessment = structured_decision_llm.invoke(decision_input)
-    raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
-    try:
-        parsed = json.loads(raw_text)
-        structure_result = Risk_Assessment.model_validate(parsed)
-    except (json.JSONDecodeError, Exception) as e:
-        logging.error(f"Decision agent parse failed: {raw_text} | {e}")
-        structure_result = Risk_Assessment(
-            overall_risk="HIGH", recommendation="BLOCK",
-            justification="Automated parsing failed — manual review required."
-        )
+    parsed=structure_result.model_dump(exclude_none=True)
+    if not parsed:
+        return {"messages": [AIMessage(content="[Decision Agent] Unable to parse structured output. Manual review required.")]}
     formatted_text = (
         f"Overall Risk: {structure_result.overall_risk}\n"
         f"Recommendation: {structure_result.recommendation}\n"
@@ -482,17 +483,7 @@ def extract_transaction_data(description:str)->dict:
         HumanMessage(content=description)
     ]
     result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
-    raw_text=result.content.strip()
-
-    cleaned=re.sub(r"```json\s*|\s*```","",raw_text).strip()
-    try:
-        parsed=json.loads(cleaned)
-
-    except json.JSONDecodeError:
-        logging.error(f"[Transaction Extraction] JSON parsing failed. Raw content: {cleaned}")
-        return None
-
-    return {k: v for k,v in parsed.items() if v is not None and v != "null" and v != ""}
+    return result.model_dump(exclude_none=True)
 
 
 
@@ -534,12 +525,7 @@ async def analyze_transactions_with_documents(
     config = {"configurable": {"thread_id": thread_id}}
 
     
-    print("========== LANGSMITH CONFIG ==========")
-    print("TRACING:", os.getenv("LANGSMITH_TRACING"))
-    print("PROJECT:", os.getenv("LANGSMITH_PROJECT"))
-    print("API KEY EXISTS:", bool(os.getenv("LANGSMITH_API_KEY")))
-    print("======================================")
-
+   
                 
     result = fraud_agent_app.invoke({
                 "messages": [HumanMessage(content=description)],
