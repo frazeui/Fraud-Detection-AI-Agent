@@ -371,7 +371,6 @@ def document_verification_node(state: AgentState):
 
     return {"messages": [AIMessage(content=summary_text)]}
 
-
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def decision_agent_node(state: AgentState):
     risk_findings = None
@@ -392,17 +391,27 @@ def decision_agent_node(state: AgentState):
             f"Provide your final risk classification and recommendation, considering BOTH sources."
         ))
     ]
-    structure_result: Risk_Assessment = structured_decision_llm.invoke(decision_input)
-    parsed=structure_result.model_dump(exclude_none=True)
-    if not parsed:
-        return {"messages": [AIMessage(content="[Decision Agent] Unable to parse structured output. Manual review required.")]}
+
+    try:
+        response = decision_llm.invoke(decision_input)
+        raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
+        parsed = json.loads(raw_text)
+        structure_result = Risk_Assessment.model_validate(parsed)
+    except Exception as e:
+        logging.error(f"[Decision Agent] Parse failed: {e}")
+        structure_result = Risk_Assessment(
+            overall_risk="HIGH",
+            recommendation="BLOCK",
+            justification="Automated decision-parsing failed — manual review required."
+        )
+
     formatted_text = (
         f"Overall Risk: {structure_result.overall_risk}\n"
         f"Recommendation: {structure_result.recommendation}\n"
         f"Justification: {structure_result.justification}"
     )
-    response = AIMessage(content=formatted_text)
-    return {"messages": [response]}
+    response_msg = AIMessage(content=formatted_text)
+    return {"messages": [response_msg]}
 
 
 def human_review_node(state: AgentState):
@@ -475,24 +484,29 @@ Fields:
 
 
 If a field is not present, return null.
-But respond with a valid JSON object containing all fields, even if some are null.
-like:{{'user_id':'...','amount':'...','transaction_count_last_hour':'...','country':'...'}}
 """
 
 
-def extract_transaction_data(description:str)->dict:
-    messages=[
-        SystemMessage(content=TRANSACTION_EXTRACTION_PROMPT),
+def extract_transaction_data(description: str) -> dict:
+    prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
+
+Respond with ONLY a valid JSON object, no markdown, no extra text."""
+
+    messages = [
+        SystemMessage(content=prompt),
         HumanMessage(content=description)
     ]
-    result:TransactionExtraction=transaction_extraction_llm.invoke(messages)
-    if result is None:
-        logging.error(f"[Transaction Extraction] Failed to extract transaction data from description: {description}")
+
+    try:
+        response = llm_risk.invoke(messages)
+        raw_text = response.content.strip()
+        cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+        parsed = json.loads(cleaned)
+    except Exception as e:
+        logging.error(f"[Transaction Extraction] Failed: {e} | raw: {locals().get('raw_text', 'N/A')}")
         return {}
-    return result.model_dump(exclude_none=True)
-
-
-
+    
+    return {k: v for k, v in parsed.items() if v is not None}
 
 @app.post("/analyze_transactions_with_documents")
 async def analyze_transactions_with_documents(
