@@ -31,6 +31,9 @@ os.environ["LANGSMITH_TRACING"] = "true"
 os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
 os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
 
+langsmith_key = os.environ.get("LANGSMITH_API_KEY")
+if langsmith_key:
+    os.environ["LANGSMITH_API_KEY"] = langsmith_key
 
 logging.basicConfig(level=logging.INFO)
 
@@ -428,8 +431,8 @@ fraud_agent_app = graph.compile(checkpointer=memory)
 
 app = FastAPI(title="Fraud Detection Agent v3")
 
-
-app.mount("/static",StaticFiles(directory="static"),name="static")
+if os.path.isdir("static"):
+    app.mount("/static",StaticFiles(directory="static"),name="static")
 
 class HumanDecisionRequest(BaseModel):
     thread_id: str
@@ -482,7 +485,7 @@ async def analyze_transactions_with_documents(
     try:
         logging.info("Extracting transaction data...")
         transaction_data=extract_transaction_data(description)
-        logging.info("DEBUG:", type(transaction_data), transaction_data)
+        logging.info("DEBUG:", {type(transaction_data)}, {transaction_data})
     
         if transaction_data:
             redis_mapping={k:str(v) for k,v in transaction_data.items()}
@@ -497,7 +500,7 @@ async def analyze_transactions_with_documents(
         max_file_size_mb = 5
         size=0
         chunks=[]
-        async for chunk in document.stream():
+        async for chunk in document.read():
             size+=len(chunk)
             if size>max_file_size_mb * 1024 * 1024:
                 return {
