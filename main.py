@@ -458,7 +458,7 @@ graph.add_edge("decision_agent", "human_review")
 graph.add_edge("human_review", END)
 
 
-memory = RedisSaver(redis_client=redis_client, ttl={"ttl":3600})
+memory = RedisSaver(redis_client=redis_client, ttl={"default_ttl":3600})
 fraud_agent_app = graph.compile(checkpointer=memory)
 
 
