@@ -458,7 +458,14 @@ graph.add_edge("decision_agent", "human_review")
 graph.add_edge("human_review", END)
 
 
-memory = RedisSaver(redis_client=redis_client, ttl=3600)
+class PatchedRedisSaver(RedisSaver):
+    def _get_latest_checkpoint_document(self, thread_id, checkpoint_ns):
+        checkpoint_key = f"{thread_id}:{checkpoint_ns}"
+        return self._redis.json().get(str(checkpoint_key), "$")
+
+
+
+memory = PatchedRedisSaver(redis_client=redis_client, ttl=3600)
 fraud_agent_app = graph.compile(checkpointer=memory)
 
 
