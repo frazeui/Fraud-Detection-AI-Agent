@@ -465,7 +465,7 @@ class PatchedRedisSaver(RedisSaver):
 
 
 
-memory = PatchedRedisSaver(redis_client=redis_client, ttl=3600)
+memory = PatchedRedisSaver(redis_client=redis_client,ttl={"default_ttl": 3600, "refresh_on_read": True})
 fraud_agent_app = graph.compile(checkpointer=memory)
 
 
