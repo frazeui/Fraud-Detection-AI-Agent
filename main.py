@@ -132,7 +132,7 @@ class OpenRouterLLM(BaseChatModel):
         for m in messages:
             role=getattr(m,"role","user")
             if isinstance(m.content,list):
-                safe_content=json.dumps(m.content)
+                formatted_message.append({"role":role,"content":m.content})
             else:
                 safe_content=str(m.content)
             formatted_message.append({"role":role,"content":safe_content})
@@ -387,6 +387,7 @@ def decision_agent_node(state: AgentState):
 
     try:
         response = decision_llm.invoke(decision_input)
+         print(f"[Debug] Decision raw response: {repr(response.content)}")
         raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
         parsed = json.loads(raw_text)
         structure_result = Risk_Assessment.model_validate(parsed)
