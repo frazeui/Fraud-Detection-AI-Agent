@@ -303,7 +303,7 @@ def extract_document_fields_lightweight(base64_image: str) -> Document_Extractio
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ]
 
-    vision_llm = OpenRouterLLM(client=openrouter_client, model="qwen2.5-72b-vision-instruct")
+    vision_llm = OpenRouterLLM(client=openrouter_client, model="space-bunny-alpha")
     try:
         response = vision_llm.invoke([HumanMessage(content=message_content)])
     except Exception as e:
