@@ -123,7 +123,7 @@ class OpenRouterLLM(BaseChatModel):
     def _llm_type(self) -> str:
         return "openrouter"
 
-    
+    @property
     def _identifying_params(self) -> dict:
         return {"model": self.model}
 
