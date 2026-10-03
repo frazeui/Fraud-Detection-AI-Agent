@@ -131,6 +131,7 @@ class OpenRouterLLM(BaseChatModel):
         formatted_message=[]
         for m in messages:
             role=getattr(m,"role","user")
+            safe_content=" "
             if isinstance(m.content,list):
                 formatted_message.append({"role":role,"content":m.content})
             else:
@@ -252,18 +253,26 @@ Important:
 - Do not invent information that cannot be seen.
 """
 
-LIGHTWEIGHT_VISION_PROMPT = """Analyze this document quickly. Return strictly a JSON object matching this schema:
-{
-    "document_type": "Passport/Driver License/Bank Statement/Unknown",
-    "name": "Full Name or null",
-    "id_number": "ID Number or null",
-    "date_of_birth": "YYYY-MM-DD or null",
-    "appears_authentic": "yes" or "no",
-    "red_flags": ["flag 1", "flag 2"],
-    "font_consistency": "consistent", "inconsistent", or "cannot_determine",
-    "tampering_indicators": ["indicator 1"],
-    "confidence_level": "Low", "Medium", or "High"
-}"""
+LIGHTWEIGHT_VISION_PROMPT = """You are analyzing a document image. 
+
+Output ONLY a single JSON object with the ACTUAL values you observe in the image. 
+Do not explain, do not write code, do not describe the schema - ONLY output the filled JSON.
+
+Required JSON keys and their ACTUAL extracted values:
+- document_type: the real document type you see (e.g. "Driver License")
+- name: the real name visible, or null
+- id_number: the real ID number visible, or null
+- date_of_birth: the real date visible, or null
+- appears_authentic: "yes" or "no" (your actual assessment)
+- red_flags: list of actual red flags you see, max 2, or []
+- font_consistency: "consistent", "inconsistent", or "cannot_determine"
+- tampering_indicators: list of actual signs, max 2, or []
+- confidence_level: "Low", "Medium", or "High"
+
+Output format example (fill with REAL data, this is just showing the structure):
+{"document_type": "Driver License", "name": "John Smith", "id_number": "ABC123", "date_of_birth": "1990-01-01", "appears_authentic": "yes", "red_flags": [], "font_consistency": "consistent", "tampering_indicators": [], "confidence_level": "High"}
+
+Now output the JSON for the actual image shown:"""
 
 
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
@@ -389,7 +398,10 @@ def decision_agent_node(state: AgentState):
         response = decision_llm.invoke(decision_input)
         print(f"[Debug] Decision raw response: {repr(response.content)}")
         raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
-        parsed = json.loads(raw_text)
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in response")
+        parsed = json.loads(match.group(0))
         structure_result = Risk_Assessment.model_validate(parsed)
     except Exception as e:
         logging.error(f"[Decision Agent] Parse failed: {e}")
