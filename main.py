@@ -123,7 +123,7 @@ class OpenRouterLLM(BaseChatModel):
     def _llm_type(self) -> str:
         return "openrouter"
 
-    # @property
+    @property
     def _identifying_params(self) -> dict:
         return {"model": self.model}
 
@@ -288,34 +288,27 @@ def should_continue_risk_analysis(state: AgentState):
 import re
 import json
 
-def extract_document_fields_lightweight(base64_image:str)->Document_Extraction_Result:
-    message=[{
-        "role":"user",
-        "content":[
-        {"type":"text","text":LIGHTWEIGHT_VISION_PROMPT},
-        {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{base64_image}"}}
-    ]}]
-    response=None
-    try:
-        response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke([HumanMessage(content=message)])
+def extract_document_fields_lightweight(base64_image: str) -> Document_Extraction_Result:
+    message_content = [
+        {"type": "text", "text": LIGHTWEIGHT_VISION_PROMPT},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+    ]
 
-    except Exception as e: 
-        print(f"[Lightweight Vision] Fallback model failed: {e}")
-        try:
-            response=OpenRouterLLM(client=openrouter_client,model="meta-llama/llama-3.1-8b-instruct",).invoke([HumanMessage(content=message)])
-        except Exception as e:
-            print(f"[Lightweight Vision] Fallback model failed: {e}")
-            return None
+    vision_llm = OpenRouterLLM(client=openrouter_client, model="meta-llama/llama-3.2-11b-vision-instruct")
+    try:
+        response = vision_llm.invoke([HumanMessage(content=message_content)])
+    except Exception as e:
+        logging.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
+        return None
 
     if not response or not response.content:
         return None
 
-    content=response.content
-    cleaned_content=re.sub(r"```json\s*|\s*```","",content).strip()
+    cleaned_content = re.sub(r"```json\s*|\s*```", "", response.content).strip()
     try:
-        parsed=json.loads(cleaned_content)
-    except json.JSONDecodeError :
-        print(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
+        parsed = json.loads(cleaned_content)
+    except json.JSONDecodeError:
+        logging.error(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
         return None
     return Document_Extraction_Result.model_validate(parsed)
 
@@ -449,7 +442,7 @@ graph.add_edge("decision_agent", "human_review")
 graph.add_edge("human_review", END)
 
 
-memory = RedisSaver(redis_client=redis_client, ttl=3600)
+memory = RedisSaver(redis_client=redis_client, ttl={"ttl":3600})
 fraud_agent_app = graph.compile(checkpointer=memory)
 
 
