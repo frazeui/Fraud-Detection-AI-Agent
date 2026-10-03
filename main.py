@@ -303,7 +303,7 @@ def extract_document_fields_lightweight(base64_image: str) -> Document_Extractio
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     ]
 
-    vision_llm = OpenRouterLLM(client=openrouter_client, model="meta-llama/llama-3.2-11b-vision-instruct")
+    vision_llm = OpenRouterLLM(client=openrouter_client, model="qwen2.5-72b-vision-instruct")
     try:
         response = vision_llm.invoke([HumanMessage(content=message_content)])
     except Exception as e:
@@ -396,9 +396,12 @@ def decision_agent_node(state: AgentState):
 
     try:
         response = decision_llm.invoke(decision_input)
-        print(f"[Debug] Decision raw response: {repr(response.content)}")
-        raw_text = re.sub(r"```json\s*|\s*```", "", response.content.strip()).strip()
-        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        logging.info(f"[Debug] Decision raw response: {repr(response.content)}")
+
+
+        raw_text=response.content.strip()
+        cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if not match:
             raise ValueError("No JSON object found in response")
         parsed = json.loads(match.group(0))
