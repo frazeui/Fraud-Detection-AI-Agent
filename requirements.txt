@@ -9,4 +9,7 @@ python-multipart
 pillow
 python-dotenv
 redis
-openai 
+openai
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi 
