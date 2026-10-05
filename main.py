@@ -24,6 +24,11 @@ from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from redis_client import client as redis_client
 from openai import OpenAI
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor,ConsoleSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from langsmith import Client
 import langsmith as ls
 
@@ -468,9 +473,25 @@ class PatchedRedisSaver(RedisSaver):
 memory = PatchedRedisSaver(redis_client=redis_client,ttl={"default_ttl": 3600, "refresh_on_read": True})
 fraud_agent_app = graph.compile(checkpointer=memory)
 
+# LLM Obserability by using opentelemetry
+
+
+
+resource=Resource.create({
+    "service.name":"fraud-detection-agent v3",
+    "service.version":"3.0.0",
+    "deployment.enviorment":"deployment"
+})
+
+provider=TracerProvider(resource=resource)
+provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+
+trace.set_tracer_provider(provider)
 
 
 app = FastAPI(title="Fraud Detection Agent v3")
+
+FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
 
 if os.path.isdir("static"):
     app.mount("/static",StaticFiles(directory="static"),name="static")
