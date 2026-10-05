@@ -32,6 +32,9 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from langsmith import Client
 import langsmith as ls
 
+
+tracer=trace.get_tracer('fraud-detection-agent v3')
+
 os.environ["LANGSMITH_TRACING"] = "true"
 os.environ["LANGSMITH_API_KEY"]=os.environ.get("LANGSMITH_API_KEY")
 os.environ["LANGSMITH_PROJECT"] = "fraud-detection-MultiAgent"
@@ -282,11 +285,12 @@ Now output the JSON for the actual image shown:"""
 
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def risk_analyst_node(state: AgentState):
-    messages = state["messages"]
-    if not any(isinstance(m, SystemMessage) for m in messages):
-        messages = [SystemMessage(content=RISK_ANALYST_PROMPT)] + messages
-    response = risk_analyst_llm.invoke(messages)
-    return {"messages": [response]}
+     with tracer.start_as_current_span("risk_analyst"):
+        messages = state["messages"]
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            messages = [SystemMessage(content=RISK_ANALYST_PROMPT)] + messages
+        response = risk_analyst_llm.invoke(messages)
+        return {"messages": [response]}
 
 
 risk_tool_node = ToolNode(risk_tools)
@@ -303,129 +307,133 @@ import re
 import json
 
 def extract_document_fields_lightweight(base64_image: str) -> Document_Extraction_Result:
-    message_content = [
-        {"type": "text", "text": LIGHTWEIGHT_VISION_PROMPT},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-    ]
+    with tracer.start_as_current_span("extract_document_fields_lightweight"):
+        message_content = [
+            {"type": "text", "text": LIGHTWEIGHT_VISION_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        ]
 
-    vision_llm = OpenRouterLLM(client=openrouter_client, model="space-bunny-alpha")
-    try:
-        response = vision_llm.invoke([HumanMessage(content=message_content)])
-    except Exception as e:
-        logging.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
-        return None
+        vision_llm = OpenRouterLLM(client=openrouter_client, model="space-bunny-alpha")
+        try:
+            response = vision_llm.invoke([HumanMessage(content=message_content)])
+        except Exception as e:
+            logging.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
+            return None
 
-    if not response or not response.content:
-        return None
+        if not response or not response.content:
+            return None
 
-    cleaned_content = re.sub(r"```json\s*|\s*```", "", response.content).strip()
-    try:
-        parsed = json.loads(cleaned_content)
-    except json.JSONDecodeError:
-        logging.error(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
-        return None
-    return Document_Extraction_Result.model_validate(parsed)
+        cleaned_content = re.sub(r"```json\s*|\s*```", "", response.content).strip()
+        try:
+            parsed = json.loads(cleaned_content)
+        except json.JSONDecodeError:
+            logging.error(f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}")
+            return None
+        return Document_Extraction_Result.model_validate(parsed)
 
 def extract_document_fields_deep_reasoning(base64_image: str) -> Document_Extraction_Result:
-    message = HumanMessage(content=[
-        {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-    ])
-    try:
-        result:Document_Extraction_Result=document_verification_llm.invoke([message])
-        return result if isinstance(result, Document_Extraction_Result) else Document_Extraction_Result.model_validate(result)
+    with tracer.start_as_current_span("extract_document_fields_deep_reasoning"):
+        message = HumanMessage(content=[
+            {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        ])
+        try:
+            result:Document_Extraction_Result=document_verification_llm.invoke([message])
+            return result if isinstance(result, Document_Extraction_Result) else Document_Extraction_Result.model_validate(result)
 
-    except Exception as e:
-        print(f"[Deep Reasoning Vision] Model failed: {e}")
-        return None
+        except Exception as e:
+            print(f"[Deep Reasoning Vision] Model failed: {e}")
+            return None
     
 def document_verification_node(state: AgentState):
-    base64_image = state.get("document_image")
+    with tracer.start_as_current_span("verify document"):
+        base64_image = state.get("document_image")
 
-    if not base64_image:
-        return {"messages": [AIMessage(content="[Document Verification] No document provided - skipping document check.")]}
+        if not base64_image:
+            return {"messages": [AIMessage(content="[Document Verification] No document provided - skipping document check.")]}
 
-    try:
-        extraction = extract_document_fields_lightweight(base64_image=base64_image)
+        try:
+            extraction = extract_document_fields_lightweight(base64_image=base64_image)
 
-        if not extraction:
-            summary_text = (
-                "[Document Verification]\n"
-                "No extraction result available. Manual review required."
-            )
-        else:
-                
-            if extraction.confidence_level=="Low" or extraction.appears_authentic in ["no",False]:
-                print(f"[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model...")
-                extraction=extract_document_fields_deep_reasoning(base64_image=base64_image)
-            
-            summary_text = (
-                    f"[Document Verification]\n"
-                    f"Document Type: {getattr(extraction, 'document_type', 'N/A')}\n"
-                    f"Appears Authentic: {getattr(extraction, 'appears_authentic', 'N/A')}\n"
-                    f"Red Flags: {getattr(extraction, 'red_flags', 'N/A')}\n"
-                    f"Font Consistency: {getattr(extraction, 'font_consistency', 'N/A')}\n"
-                    f"Confidence Level: {getattr(extraction, 'confidence_level', 'N/A')}"
+            if not extraction:
+                summary_text = (
+                    "[Document Verification]\n"
+                    "No extraction result available. Manual review required."
                 )
-            
-    except Exception as e:
-            print(f"[Document Verification Error] {type(e).__name__}: {e}")
-            summary_text = (
-            "[Document Verification]\n"
-            "Automated document verification failed due to a technical issue. "
-            "This transaction requires MANUAL document review before approval."
-        )
+            else:
+                    
+                if extraction.confidence_level=="Low" or extraction.appears_authentic in ["no",False]:
+                    print(f"[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model...")
+                    extraction=extract_document_fields_deep_reasoning(base64_image=base64_image)
+                
+                summary_text = (
+                        f"[Document Verification]\n"
+                        f"Document Type: {getattr(extraction, 'document_type', 'N/A')}\n"
+                        f"Appears Authentic: {getattr(extraction, 'appears_authentic', 'N/A')}\n"
+                        f"Red Flags: {getattr(extraction, 'red_flags', 'N/A')}\n"
+                        f"Font Consistency: {getattr(extraction, 'font_consistency', 'N/A')}\n"
+                        f"Confidence Level: {getattr(extraction, 'confidence_level', 'N/A')}"
+                    )
+                
+        except Exception as e:
+                print(f"[Document Verification Error] {type(e).__name__}: {e}")
+                summary_text = (
+                "[Document Verification]\n"
+                "Automated document verification failed due to a technical issue. "
+                "This transaction requires MANUAL document review before approval."
+            )
 
-    return {"messages": [AIMessage(content=summary_text)]}
+        return {"messages": [AIMessage(content=summary_text)]}
 
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def decision_agent_node(state: AgentState):
-    risk_findings = None
-    document_findings = None
+    with tracer.start_as_current_span("decision_agent"):
+        risk_findings = None
+        document_findings = None
 
-    for m in reversed(state["messages"]):
-        if isinstance(m, AIMessage) and m.content and "[Document Verification]" in m.content and document_findings is None:
-            document_findings = m.content
-        elif isinstance(m, AIMessage) and not getattr(m, "tool_calls", None) and m.content and risk_findings is None:
-            if "[Document Verification]" not in m.content:
-                risk_findings = m.content
+        for m in reversed(state["messages"]):
+            if isinstance(m, AIMessage) and m.content and "[Document Verification]" in m.content and document_findings is None:
+                document_findings = m.content
+            elif isinstance(m, AIMessage) and not getattr(m, "tool_calls", None) and m.content and risk_findings is None:
+                if "[Document Verification]" not in m.content:
+                    risk_findings = m.content
 
-    decision_input = [
-        SystemMessage(content=DECISION_AGENT_PROMPT),
-        HumanMessage(content=(
-            f"Transaction Risk Findings:\n{risk_findings}\n\n"
-            f"Document Verification Findings:\n{document_findings or 'None provided'}\n\n"
-            f"Provide your final risk classification and recommendation, considering BOTH sources."
-        ))
-    ]
+        decision_input = [
+            SystemMessage(content=DECISION_AGENT_PROMPT),
+            HumanMessage(content=(
+                f"Transaction Risk Findings:\n{risk_findings}\n\n"
+                f"Document Verification Findings:\n{document_findings or 'None provided'}\n\n"
+                f"Provide your final risk classification and recommendation, considering BOTH sources."
+            ))
+        ]
 
-    try:
-        response = decision_llm.invoke(decision_input)
-        logging.info(f"[Debug] Decision raw response: {repr(response.content)}")
+        try:
+            response = decision_llm.invoke(decision_input)
+            logging.info(f"[Debug] Decision raw response: {repr(response.content)}")
 
 
-        raw_text=response.content.strip()
-        cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            raise ValueError("No JSON object found in response")
-        parsed = json.loads(match.group(0))
-        structure_result = Risk_Assessment.model_validate(parsed)
-    except Exception as e:
-        logging.error(f"[Decision Agent] Parse failed: {e}")
-        structure_result = Risk_Assessment(
-            overall_risk="HIGH",
-            recommendation="BLOCK",
-            justification="Automated decision-parsing failed — manual review required."
+            raw_text=response.content.strip()
+            cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object found in response")
+            parsed = json.loads(match.group(0))
+            structure_result = Risk_Assessment.model_validate(parsed)
+        except Exception as e:
+            logging.error(f"[Decision Agent] Parse failed: {e}")
+            structure_result = Risk_Assessment(
+                overall_risk="HIGH",
+                recommendation="BLOCK",
+                justification="Automated decision-parsing failed — manual review required."
+            )
+
+        formatted_text = (
+            f"Overall Risk: {structure_result.overall_risk}\n"
+            f"Recommendation: {structure_result.recommendation}\n"
+            f"Justification: {structure_result.justification}"
         )
-
-    formatted_text = (
-        f"Overall Risk: {structure_result.overall_risk}\n"
-        f"Recommendation: {structure_result.recommendation}\n"
-        f"Justification: {structure_result.justification}"
-    )
-    response_msg = AIMessage(content=formatted_text)
-    return {"messages": [response_msg]}
+        response_msg = AIMessage(content=formatted_text)
+        return {"messages": [response_msg]}
 
 
 def human_review_node(state: AgentState):
@@ -480,7 +488,7 @@ fraud_agent_app = graph.compile(checkpointer=memory)
 resource=Resource.create({
     "service.name":"fraud-detection-agent v3",
     "service.version":"3.0.0",
-    "deployment.enviorment":"deployment"
+    "deployment.environment":"deployment"
 })
 
 provider=TracerProvider(resource=resource)
@@ -525,25 +533,26 @@ If a field is not present, return null.
 
 
 def extract_transaction_data(description: str) -> dict:
-    prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
+    with tracer.start_as_current_span("extract_transaction_data"):
+        prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
 
-Respond with ONLY a valid JSON object, no markdown, no extra text."""
+    Respond with ONLY a valid JSON object, no markdown, no extra text."""
 
-    messages = [
-        SystemMessage(content=prompt),
-        HumanMessage(content=description)
-    ]
+        messages = [
+            SystemMessage(content=prompt),
+            HumanMessage(content=description)
+        ]
 
-    try:
-        response = llm_risk.invoke(messages)
-        raw_text = response.content.strip()
-        cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
-        parsed = json.loads(cleaned)
-    except Exception as e:
-        logging.error(f"[Transaction Extraction] Failed: {e} | raw: {locals().get('raw_text', 'N/A')}")
-        return {}
-    
-    return {k: v for k, v in parsed.items() if v is not None}
+        try:
+            response = llm_risk.invoke(messages)
+            raw_text = response.content.strip()
+            cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+            parsed = json.loads(cleaned)
+        except Exception as e:
+            logging.error(f"[Transaction Extraction] Failed: {e} | raw: {locals().get('raw_text', 'N/A')}")
+            return {}
+        
+        return {k: v for k, v in parsed.items() if v is not None}
 
 @app.post("/analyze_transactions_with_documents")
 async def analyze_transactions_with_documents(
@@ -559,8 +568,9 @@ async def analyze_transactions_with_documents(
     
         if transaction_data:
             logging.info(f"DEBUG: {type(transaction_data)} {transaction_data}")
-            redis_mapping={k:str(v) for k,v in transaction_data.items()}
-            redis_client.hset(f"transaction:{thread_id}",mapping=redis_mapping)
+            with tracer.start_as_current_span("redis_store_transaction"):
+                redis_mapping={k:str(v) for k,v in transaction_data.items()}
+                redis_client.hset(f"transaction:{thread_id}",mapping=redis_mapping)
     except Exception as e:
         logging.error(f"Redis Error: {e}")
 
@@ -583,12 +593,12 @@ async def analyze_transactions_with_documents(
 
     
    
-                
-    result = fraud_agent_app.invoke({
-                "messages": [HumanMessage(content=description)],
-                "document_image": base64_image
-            }, config=config)
-    
+    with tracer.start_as_current_span("fraud_agent_graph"):            
+        result = fraud_agent_app.invoke({
+                    "messages": [HumanMessage(content=description)],
+                    "document_image": base64_image
+                }, config=config)
+        
     if "__interrupt__" in result:
         interrupt_data = result["__interrupt__"][0].value
         return {
