@@ -502,7 +502,7 @@ def extract_document_fields_deep_reasoning(
             llm_duration.record(
                 time.time() - vision_time,
                 {
-                    "model": document_verification_llm,
+                    "model": "qwen3.6-27b",
                     "operation": "extrat document field with deepweight model",
                 },
             )
@@ -785,7 +785,7 @@ def extract_transaction_data(description: str) -> dict:
     with tracer.start_as_current_span("extract_transaction_data") as span:
         span.set_attribute("operation", "transaction_extraction")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", transaction_extraction_llm.model)  # type: ignore
+        span.set_attribute("llm.model", llm_risk.model)  # type: ignore
 
         prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
 
