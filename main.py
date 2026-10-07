@@ -10,7 +10,7 @@ from langchain_core.tools.base import BaseTool
 load_dotenv()
 
 from typing import Annotated, Literal, TypedDict
-
+from google import genai
 from fastapi import FastAPI, Form, UploadFile
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -111,8 +111,12 @@ if langsmith_key:
 logging.basicConfig(level=logging.INFO)
 
 
-client = Client(api_key=os.environ["LANGSMITH_API_KEY"])
+GEMINI_API_KEY=os.getenv("GEMINI_API_KEY")
 
+client = Client(api_key=os.environ["LANGSMITH_API_KEY"])
+gemini_client=genai.Client(api_key=GEMINI_API_KEY)
+
+GEMINI_VISION_MODEL = "gemini-2.5-flash-lite"
 
 USER_PROFILES = {
     "user_101": {"home_country": "UAE", "avg_transaction": 500},
@@ -428,53 +432,99 @@ import json
 
 def extract_document_fields_lightweight(
     base64_image: str,
-) -> Document_Extraction_Result:
-    with tracer.start_as_current_span("extract_document_fields_lightweight") as span:
-        span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", "space-bunny-alpha")
-        span.set_attribute("operation", "document_extrcation")
+) -> Document_Extraction_Result | None:
+
+    with tracer.start_as_current_span(
+        "extract_document_fields_lightweight"
+    ) as span:
+
+        span.set_attribute("llm_provider", "google")
+        span.set_attribute("llm.model", GEMINI_VISION_MODEL)
+        span.set_attribute("operation", "document_extraction")
         span.set_attribute("vision.state", "lightweight")
 
-        message_content = [
-            {"type": "text", "text": LIGHTWEIGHT_VISION_PROMPT},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-            },
-        ]
-
-        vision_llm = OpenRouterLLM(client=openrouter_client, model="space-bunny-alpha")
         try:
             vision_start = time.time()
-            response = vision_llm.invoke([HumanMessage(content=message_content)])  # type: ignore
+
+            response = gemini_client.models.generate_content(
+                model=GEMINI_VISION_MODEL,
+                contents=[
+                    {
+                        "text": LIGHTWEIGHT_VISION_PROMPT,
+                    },
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": base64_image,
+                        },
+                    },
+                ],
+                config={
+                    "response_mime_type": "application/json",
+                },
+            )
+
             llm_duration.record(
                 time.time() - vision_start,
                 {
-                    "model": vision_llm.model,
+                    "model": GEMINI_VISION_MODEL,
                     "operation": "document extraction with lightweight model",
                 },
             )
-        except RuntimeError as e:
+
+        except Exception as e:
             error_counter.add(1)
-            logger.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
-            return None  # type: ignore
 
-        span.set_attribute("llm.response_received", response is not None)
+            logger.error(
+                f"[Lightweight Vision] Call failed: "
+                f"{type(e).__name__}: {e}"
+            )
 
-        if not response or not response.content:
-            return None  # type: ignore
+            span.record_exception(e)
 
-        cleaned_content = re.sub(r"```json\s*|\s*```", "", response.content).strip()  # type: ignore
-        try:
-            parsed = json.loads(cleaned_content)
-        except json.JSONDecodeError:
+            return None
+
+        span.set_attribute(
+            "llm.response_received",
+            response is not None,
+        )
+
+        if not response or not response.text:
             error_counter.add(1)
             logger.error(
-                f"[Lightweight Vision] JSON parsing failed. Raw content: {cleaned_content}"
+                "[Lightweight Vision] Empty response from Gemini"
             )
-            return None  # type: ignore
-        return Document_Extraction_Result.model_validate(parsed)
+            return None
 
+        try:
+            parsed = json.loads(response.text)
+
+        except json.JSONDecodeError as e:
+            error_counter.add(1)
+
+            logger.error(
+                f"[Lightweight Vision] JSON parsing failed: "
+                f"{e}"
+            )
+
+            span.record_exception(e)
+
+            return None
+
+        try:
+            return Document_Extraction_Result.model_validate(parsed)
+
+        except Exception as e:
+            error_counter.add(1)
+
+            logger.error(
+                f"[Lightweight Vision] Schema validation failed: "
+                f"{e}"
+            )
+
+            span.record_exception(e)
+
+            return None
 
 def extract_document_fields_deep_reasoning(
     base64_image: str,
