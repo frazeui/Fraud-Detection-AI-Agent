@@ -19,3 +19,4 @@ mypy
 black
 opentelemetry-exporter-prometheus
 prometheus-client
+google-genai
