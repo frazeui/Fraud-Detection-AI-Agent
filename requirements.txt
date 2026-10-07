@@ -13,3 +13,9 @@ openai
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi 
+ruff
+pytest
+mypy
+black
+opentelemetry-exporter-prometheus
+prometheus-client
