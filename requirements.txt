@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 langgraph
 langchain-groq
+langchain-openai
 langgraph-checkpoint-redis
 tenacity
 pydantic
