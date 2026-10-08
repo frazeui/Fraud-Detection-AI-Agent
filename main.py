@@ -161,7 +161,7 @@ def check_location_mismatch(user_id: str, transaction_country: str) -> str:
     if not profile:
         return "Error: User profile not found"
     home = profile["home_country"]
-    if home != transaction_country.lower():
+    if home.lower() != transaction_country.lower():
         return f"MEDIUM RISK: Transaction from {transaction_country}, but user's home country is {home}"
     return (
         f"LOW RISK: Transaction location ({transaction_country}) matches home country"
@@ -341,8 +341,21 @@ Additional Rules:
 1. Justification must reference the specific findings from the Risk Analyst - never invent new data.
 2. When referencing the amount finding, use the exact multiplier format (e.g., '4.0x higher'), never percentage.
 3. Use exactly these field names: overall_risk, recommendation, justification.
-But Respond with a valid JSON Object:
-like {{"overall_risk": "...", "recommendation": "...", "justification": "..."}}"""
+Additional Rules:
+
+1. Justification must reference the specific findings from the Risk Analyst - never invent new data.
+
+2. When referencing the amount finding, use the exact multiplier format
+   (e.g., '4.0x higher'), never percentage.
+
+3. Use exactly these fields:
+   overall_risk
+   recommendation
+   justification
+
+Return the answer using the required structured schema.
+Do not add additional fields.
+"""
 
 DOCUMENT_VERIFICATION_PROMPT = """
 Examine the provided document image.
@@ -593,7 +606,10 @@ def document_verification_node(state: AgentState):
                 span.set_attribute(
                     "document.confidence_level", extraction.confidence_level
                 )
-                span.set_attribute("vision.escalated", True)
+                span.set_attribute("vision.escalated", False)
+
+            
+            deep_extraction=extract_document_fields_deep_reasoning(base64_image=base64_image)
 
             if not extraction:
                 summary_text = (
@@ -608,26 +624,24 @@ def document_verification_node(state: AgentState):
                     print(
                         "[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model..."
                     )
-                    extraction = extract_document_fields_deep_reasoning(
-                        base64_image=base64_image
-                    )
-                    if extraction:
-                        span.set_attribute("vision.state", "lightweight")
+                    
+                    if deep_extraction:
+                        span.set_attribute("vision.state", "deep_reasoning")
                         span.set_attribute(
-                            "document.authentic", extraction.appears_authentic
+                            "document.authentic", deep_extraction.appears_authentic
                         )
                         span.set_attribute(
-                            "document.confidence_level", extraction.confidence_level
+                            "document.confidence_level", deep_extraction.confidence_level
                         )
-                        span.set_attribute("vision.escalated", False)
+                        span.set_attribute("vision.escalated", True)
 
                 summary_text = (
                     f"[Document Verification]\n"
-                    f"Document Type: {getattr(extraction, 'document_type', 'N/A')}\n"
-                    f"Appears Authentic: {getattr(extraction, 'appears_authentic', 'N/A')}\n"
-                    f"Red Flags: {getattr(extraction, 'red_flags', 'N/A')}\n"
-                    f"Font Consistency: {getattr(extraction, 'font_consistency', 'N/A')}\n"
-                    f"Confidence Level: {getattr(extraction, 'confidence_level', 'N/A')}"
+                    f"Document Type: {getattr(deep_extraction, 'document_type', 'N/A')}\n"
+                    f"Appears Authentic: {getattr(deep_extraction, 'appears_authentic', 'N/A')}\n"
+                    f"Red Flags: {getattr(deep_extraction, 'red_flags', 'N/A')}\n"
+                    f"Font Consistency: {getattr(deep_extraction, 'font_consistency', 'N/A')}\n"
+                    f"Confidence Level: {getattr(deep_extraction, 'confidence_level', 'N/A')}"
                 )
 
         except RuntimeError as e:
@@ -682,24 +696,24 @@ def decision_agent_node(state: AgentState):
 
         try:
             decision_time = time.time()
-            response = decision_llm.invoke(decision_input)
             llm_duration.record(
                 time.time() - decision_time,
                 {"model": decision_llm.model, "operation": "Fraud Detecting"},
             )
 
+            response = decision_llm.invoke(decision_input)
+            
+            structure_result=(
+                response
+                if isinstance(response,Risk_Assessment)
+                else Risk_Assessment.model_validate(response)
+            )
+            
+            
             logger.info(f"[Debug] Decision raw response: {response.content!r}")
 
-            raw_text = response.content.strip()  # type: ignore
 
-            cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
 
-            if not match:
-                raise ValueError("No JSON object found in response")
-
-            parsed = json.loads(match.group(0))
-            structure_result = Risk_Assessment.model_validate(parsed)
 
             span.set_attribute("decision.overall_risk", structure_result.overall_risk)
             span.set_attribute(
