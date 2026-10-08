@@ -292,7 +292,7 @@ decision_llm = llm_risk
 structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
-llm_vision = ChatGroq(model="qwen3.6-27b", api_key=GROQ_API_KEY)  # type: ignore
+llm_vision = ChatGroq(model="qwen/qwen3.6-27b", api_key=GROQ_API_KEY)  # type: ignore
 document_verification_llm = llm_vision.with_structured_output(
     Document_Extraction_Result
 )
@@ -531,7 +531,7 @@ def extract_document_fields_deep_reasoning(
 ) -> Document_Extraction_Result:
     with tracer.start_as_current_span("extract_document_fields_deep_reasoning") as span:
         span.set_attribute("llm_provider", "groq")
-        span.set_attribute("llm.model", "qwen3.6-27b")
+        span.set_attribute("llm.model", "qwen/qwen3.6-27b")
         span.set_attribute("operation", "document_verification")
         span.set_attribute("vision_stage", "deep_reasoning")
 
@@ -552,7 +552,7 @@ def extract_document_fields_deep_reasoning(
             llm_duration.record(
                 time.time() - vision_time,
                 {
-                    "model": "qwen3.6-27b",
+                    "model": "qwen/qwen3.6-27b",
                     "operation": "extrat document field with deepweight model",
                 },
             )

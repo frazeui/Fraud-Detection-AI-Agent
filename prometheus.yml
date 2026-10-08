@@ -4,4 +4,4 @@ global:
 scrape_configs:
   - job_name: "fraud-detection-api"
     static_configs:
-      - targets: ["host.docker.internal:8000"]
+      - targets: ["fraud-detection-ai-agent-guzv6so9a-frazeuis-projects.vercel.app"]
