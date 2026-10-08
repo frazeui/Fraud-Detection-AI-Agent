@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -78,7 +79,6 @@ decision_counter = meter.create_counter(
     "fraud_detection_decisions",
     description="Counts the number of decisions made by the fraud detection agent",
 )
-
 
 recommendation_counter = meter.create_counter(
     "fraud_detection_recommendations",
@@ -279,17 +279,14 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 OPENROUTER_API_KEY: str | None = os.environ.get("OPEN_ROUTER_API_KEY")
 
-openrouter_client = OpenAI(
-    api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"
-)
+structured_openrouter_llm = ChatOpenAI(
+        api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1",model="meta-llama/llama-3.1-8b-instruct"
+    )
 
 
-llm_risk = OpenRouterLLM(
-    client=openrouter_client, model="meta-llama/llama-3.1-8b-instruct"
-)
-risk_analyst_llm = llm_risk.bind_tools(risk_tools)
-decision_llm = llm_risk
-structured_decision_llm = decision_llm.with_structured_output(Risk_Assessment)
+risk_analyst_llm = structured_openrouter_llm.bind_tools(risk_tools)
+decision_llm = structured_openrouter_llm
+structured_decision_llm = structured_openrouter_llm.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
 llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY)  # type: ignore
@@ -337,10 +334,7 @@ Output: overall_risk=LOW, recommendation=APPROVE
 
 Recommendation mapping: LOW->APPROVE, MEDIUM->REVIEW, HIGH->BLOCK
 
-Additional Rules:
-1. Justification must reference the specific findings from the Risk Analyst - never invent new data.
-2. When referencing the amount finding, use the exact multiplier format (e.g., '4.0x higher'), never percentage.
-3. Use exactly these field names: overall_risk, recommendation, justification.
+
 Additional Rules:
 
 1. Justification must reference the specific findings from the Risk Analyst - never invent new data.
