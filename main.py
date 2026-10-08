@@ -279,14 +279,14 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 OPENROUTER_API_KEY: str | None = os.environ.get("OPEN_ROUTER_API_KEY")
 
-structured_openrouter_llm = ChatOpenAI(
+llm_risk= ChatOpenAI(
         api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1",model="meta-llama/llama-3.1-8b-instruct"
     )
 
 
-risk_analyst_llm = structured_openrouter_llm.bind_tools(risk_tools)
-decision_llm = structured_openrouter_llm
-structured_decision_llm = structured_openrouter_llm.with_structured_output(Risk_Assessment)
+risk_analyst_llm = llm_risk.bind_tools(risk_tools)
+decision_llm = llm_risk
+structured_decision_llm = llm_risk.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
 llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY)  # type: ignore
