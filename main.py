@@ -116,7 +116,7 @@ GEMINI_API_KEY=os.getenv("GEMINI_API_KEY")
 client = Client(api_key=os.environ["LANGSMITH_API_KEY"])
 gemini_client=genai.Client(api_key=GEMINI_API_KEY)
 
-GEMINI_VISION_MODEL = "gemini-2.5-flash-lite"
+GEMINI_VISION_MODEL = "gemini-3.5-flash-lite"
 
 USER_PROFILES = {
     "user_101": {"home_country": "UAE", "avg_transaction": 500},
@@ -912,6 +912,7 @@ async def analyze_transactions_with_documents(
             config=config,
         )
 
+        span.set_attribute("fraud.workflow_status", "completed")
     if "__interrupt__" in result:
         span.set_attribute("fraud.workflow_status", "pending_human_review")
 
@@ -923,7 +924,6 @@ async def analyze_transactions_with_documents(
             "message": "High risk detected. Call /human_decision with your decision.",
             "processing_time_seconds": round(time.time() - start, 2),
         }
-    span.set_attribute("fraud.workflow_status", "completed")
     duration = time.time() - start
     request_duration.record(
         duration, {"endpoint": "/analyze_transactions_with_documents"}
