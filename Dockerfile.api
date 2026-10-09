@@ -1,5 +1,0 @@
-FROM vllm/vllm-openai:latest
-
-ENV MODEL_NAME="Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
-
-CMD vllm serve $MODEL_NAME --port 8000 --enforce-eager --gpu-memory-utilization 0.85 --quantization gptq

@@ -10,9 +10,10 @@ from langchain_core.tools.base import BaseTool
 load_dotenv()
 
 from typing import Annotated, Literal, TypedDict
-from google import genai
+
 from fastapi import FastAPI, Form, UploadFile
 from fastapi.staticfiles import StaticFiles
+from google import genai
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
@@ -23,7 +24,6 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 from langsmith import Client
-from openai import OpenAI
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -111,10 +111,10 @@ if langsmith_key:
 logging.basicConfig(level=logging.INFO)
 
 
-GEMINI_API_KEY=os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = Client(api_key=os.environ["LANGSMITH_API_KEY"])
-gemini_client=genai.Client(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 GEMINI_VISION_MODEL = "gemini-3.5-flash-lite"
 
@@ -161,7 +161,7 @@ def check_location_mismatch(user_id: str, transaction_country: str) -> str:
     if not profile:
         return "Error: User profile not found"
     home = profile["home_country"]
-    if home.lower() != transaction_country.lower():
+    if home.lower() != transaction_country.lower(): #type: ignore
         return f"MEDIUM RISK: Transaction from {transaction_country}, but user's home country is {home}"
     return (
         f"LOW RISK: Transaction location ({transaction_country}) matches home country"
@@ -279,9 +279,11 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 OPENROUTER_API_KEY: str | None = os.environ.get("OPEN_ROUTER_API_KEY")
 
-llm_risk= ChatOpenAI(
-        api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1",model="meta-llama/llama-3.1-8b-instruct"
-    )
+llm_risk = ChatOpenAI(
+    api_key=OPENROUTER_API_KEY, #type: ignore
+    base_url="https://openrouter.ai/api/v1",
+    model="meta-llama/llama-3.1-8b-instruct",
+)
 
 
 risk_analyst_llm = llm_risk.bind_tools(risk_tools)
@@ -441,10 +443,7 @@ def extract_document_fields_lightweight(
     base64_image: str,
 ) -> Document_Extraction_Result | None:
 
-    with tracer.start_as_current_span(
-        "extract_document_fields_lightweight"
-    ) as span:
-
+    with tracer.start_as_current_span("extract_document_fields_lightweight") as span:
         span.set_attribute("llm_provider", "google")
         span.set_attribute("llm.model", GEMINI_VISION_MODEL)
         span.set_attribute("operation", "document_extraction")
@@ -455,7 +454,7 @@ def extract_document_fields_lightweight(
 
             response = gemini_client.models.generate_content(
                 model=GEMINI_VISION_MODEL,
-                contents=[
+                contents=[ #type: ignore
                     {
                         "text": LIGHTWEIGHT_VISION_PROMPT,
                     },
@@ -479,13 +478,10 @@ def extract_document_fields_lightweight(
                 },
             )
 
-        except Exception as e:
+        except RuntimeError as e:
             error_counter.add(1)
 
-            logger.error(
-                f"[Lightweight Vision] Call failed: "
-                f"{type(e).__name__}: {e}"
-            )
+            logger.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
 
             span.record_exception(e)
 
@@ -498,9 +494,7 @@ def extract_document_fields_lightweight(
 
         if not response or not response.text:
             error_counter.add(1)
-            logger.error(
-                "[Lightweight Vision] Empty response from Gemini"
-            )
+            logger.error("[Lightweight Vision] Empty response from Gemini")
             return None
 
         try:
@@ -509,10 +503,7 @@ def extract_document_fields_lightweight(
         except json.JSONDecodeError as e:
             error_counter.add(1)
 
-            logger.error(
-                f"[Lightweight Vision] JSON parsing failed: "
-                f"{e}"
-            )
+            logger.error(f"[Lightweight Vision] JSON parsing failed: {e}")
 
             span.record_exception(e)
 
@@ -521,17 +512,15 @@ def extract_document_fields_lightweight(
         try:
             return Document_Extraction_Result.model_validate(parsed)
 
-        except Exception as e:
+        except RuntimeError as e:
             error_counter.add(1)
 
-            logger.error(
-                f"[Lightweight Vision] Schema validation failed: "
-                f"{e}"
-            )
+            logger.error(f"[Lightweight Vision] Schema validation failed: {e}")
 
             span.record_exception(e)
 
             return None
+
 
 def extract_document_fields_deep_reasoning(
     base64_image: str,
@@ -602,8 +591,9 @@ def document_verification_node(state: AgentState):
                 )
                 span.set_attribute("vision.escalated", False)
 
-            
-            deep_extraction=extract_document_fields_deep_reasoning(base64_image=base64_image)
+            deep_extraction = extract_document_fields_deep_reasoning(
+                base64_image=base64_image
+            )
 
             if not extraction:
                 summary_text = (
@@ -618,14 +608,15 @@ def document_verification_node(state: AgentState):
                     print(
                         "[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model..."
                     )
-                    
+
                     if deep_extraction:
                         span.set_attribute("vision.state", "deep_reasoning")
                         span.set_attribute(
                             "document.authentic", deep_extraction.appears_authentic
                         )
                         span.set_attribute(
-                            "document.confidence_level", deep_extraction.confidence_level
+                            "document.confidence_level",
+                            deep_extraction.confidence_level,
                         )
                         span.set_attribute("vision.escalated", True)
 
@@ -696,18 +687,14 @@ def decision_agent_node(state: AgentState):
             )
 
             response = decision_llm.invoke(decision_input)
-            
-            structure_result=(
+
+            structure_result = (
                 response
-                if isinstance(response,Risk_Assessment)
+                if isinstance(response, Risk_Assessment)
                 else Risk_Assessment.model_validate(response)
             )
-            
-            
+
             logger.info(f"[Debug] Decision raw response: {response.content!r}")
-
-
-
 
             span.set_attribute("decision.overall_risk", structure_result.overall_risk)
             span.set_attribute(
@@ -843,7 +830,7 @@ def extract_transaction_data(description: str) -> dict:
     with tracer.start_as_current_span("extract_transaction_data") as span:
         span.set_attribute("operation", "transaction_extraction")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", llm_risk.model)  # type: ignore
+        span.set_attribute("llm.model", llm_risk.model)  
 
         prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
 
