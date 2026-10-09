@@ -17,8 +17,6 @@ opentelemetry-instrumentation-fastapi
 ruff
 pytest
 mypy
-black
-black[jupyter]
 opentelemetry-exporter-prometheus
 prometheus-client
 google-genai
