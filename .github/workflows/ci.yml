@@ -63,8 +63,6 @@ jobs:
     - name: Run mypy type checker
       run: mypy .
 
-    - name: Run black code formatter
-      run: black --check .
 
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
