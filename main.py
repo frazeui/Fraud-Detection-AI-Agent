@@ -30,6 +30,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import Status, StatusCode
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from prometheus_client import CollectorRegistry, make_asgi_app
 from pydantic import BaseModel, Field
@@ -279,16 +280,17 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 OPENROUTER_API_KEY: str | None = os.environ.get("OPEN_ROUTER_API_KEY")
 
-llm_risk = ChatOpenAI(
+llm = ChatOpenAI(
     api_key=OPENROUTER_API_KEY, #type: ignore
     base_url="https://openrouter.ai/api/v1",
     model="meta-llama/llama-3.1-8b-instruct",
 )
 
+MODEL_NAME = "meta-llama/llama-3.1-8b-instruct"
 
-risk_analyst_llm = llm_risk.bind_tools(risk_tools)
-decision_llm = llm_risk
-structured_decision_llm = llm_risk.with_structured_output(Risk_Assessment)
+llm_risk = llm.bind_tools(risk_tools)
+
+structured_decision_llm = llm.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
 llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY)  # type: ignore
@@ -408,8 +410,8 @@ Now output the JSON for the actual image shown:"""
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def risk_analyst_node(state: AgentState):
     with tracer.start_as_current_span("risk_analyst") as span:
-        span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", llm_risk.model)
+        span.set_attribute("llm_provider", "openrouter") 
+        span.set_attribute("llm.model", MODEL_NAME)
         span.set_attribute("operation", "risk_analysis")
 
         messages = state["messages"]
@@ -417,11 +419,11 @@ def risk_analyst_node(state: AgentState):
             messages = [SystemMessage(content=RISK_ANALYST_PROMPT)] + messages
 
         llm_start = time.time()
-        response = risk_analyst_llm.invoke(messages)
+        response = llm_risk.invoke(messages)
 
         llm_duration.record(
-            time.time() - llm_start,
-            {"model": llm_risk.model, "operation": "Risk Analysis"},
+            time.time() - llm_start, 
+            {"model": MODEL_NAME, "operation": "Risk Analysis"},
         )
         return {"messages": [response]}
 
@@ -641,89 +643,117 @@ def document_verification_node(state: AgentState):
         return {"messages": [AIMessage(content=summary_text)]}
 
 
-@retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
+@retry(
+    wait=wait_random_exponential(min=2, max=10),
+    stop=stop_after_attempt(2),
+)
 def decision_agent_node(state: AgentState):
     with tracer.start_as_current_span("decision_agent") as span:
         span.set_attribute("operation", "decision_agent")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", decision_llm.model)
+        span.set_attribute("llm.model", MODEL_NAME) 
 
         risk_findings = None
         document_findings = None
 
         for m in reversed(state["messages"]):
-            if (
-                isinstance(m, AIMessage)
-                and m.content
-                and "[Document Verification]" in m.content
-                and document_findings is None
-            ):
-                document_findings = m.content
-            elif (
-                isinstance(m, AIMessage)
-                and not getattr(m, "tool_calls", None)
-                and m.content
-                and risk_findings is None
-                and "[Document Verification]" not in m.content
-            ):
+            if not isinstance(m, AIMessage) or not m.content:
+                continue
+
+            if getattr(m, "tool_calls", None):
+                continue
+
+            if "[Document Verification]" in m.content:
+                if document_findings is None:
+                    document_findings = m.content
+            elif risk_findings is None:
                 risk_findings = m.content
+
+            if risk_findings and document_findings:
+                break
 
         decision_input = [
             SystemMessage(content=DECISION_AGENT_PROMPT),
             HumanMessage(
                 content=(
-                    f"Transaction Risk Findings:\n{risk_findings}\n\n"
-                    f"Document Verification Findings:\n{document_findings or 'None provided'}\n\n"
-                    f"Provide your final risk classification and recommendation, considering BOTH sources."
+                    f"Transaction Risk Findings:\n"
+                    f"{risk_findings or 'None provided'}\n\n"
+                    f"Document Verification Findings:\n"
+                    f"{document_findings or 'None provided'}\n\n"
+                    "Provide your final risk classification and recommendation, "
+                    "considering BOTH sources."
                 )
             ),
         ]
 
+        start_time = time.perf_counter()
+
         try:
-            decision_time = time.time()
-            llm_duration.record(
-                time.time() - decision_time,
-                {"model": decision_llm.model, "operation": "Fraud Detecting"},
-            )
+            response = structured_decision_llm.invoke(decision_input)
 
-            response = decision_llm.invoke(decision_input)
+            if isinstance(response, Risk_Assessment):
+                structure_result = response
+            else:
+                structure_result = Risk_Assessment.model_validate(response)
 
-            structure_result = (
-                response
-                if isinstance(response, Risk_Assessment)
-                else Risk_Assessment.model_validate(response)
-            )
-
-            logger.info(f"[Debug] Decision raw response: {response.content!r}")
-
-            span.set_attribute("decision.overall_risk", structure_result.overall_risk)
             span.set_attribute(
-                "decision.recommendation", structure_result.recommendation
+                "decision.overall_risk",
+                structure_result.overall_risk,
+            )
+            span.set_attribute(
+                "decision.recommendation",
+                structure_result.recommendation,
+            )
+            span.set_attribute("decision_agent_failed", False)
+
+            logger.info(
+                "[Decision Agent] Result: %s",
+                structure_result.model_dump(),
             )
 
-        except json.JSONDecodeError as e:
-            error_counter.add(1)
+        except Exception as e:
+            error_counter.add(
+                1,
+                {"operation": "decision_agent"},
+            )
             span.record_exception(e)
-            span.set_attribute("decision_agent_faied", True)
+            span.set_attribute("decision_agent_failed", True)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
 
-            logger.error(f"[Decision Agent] Parse failed: {e}")
+            logger.exception("[Decision Agent] Failed")
 
             structure_result = Risk_Assessment(
                 overall_risk="HIGH",
                 recommendation="BLOCK",
-                justification="Automated decision-parsing failed — manual review required.",
+                justification=(
+                    "Automated decision failed. "
+                    "Fail-safe classification applied; manual review required."
+                ),
             )
 
-        span.set_attribute("decision_agent_faied", False)
+        finally:
+            llm_duration.record(
+                time.perf_counter() - start_time,
+                {  
+                    "model": MODEL_NAME,
+                    "operation": "decision_agent",
+                },
+            )
+
         formatted_text = (
             f"Overall Risk: {structure_result.overall_risk}\n"
             f"Recommendation: {structure_result.recommendation}\n"
             f"Justification: {structure_result.justification}"
         )
-        response_msg = AIMessage(content=formatted_text)
-        decision_counter.add(1, {"overall_risk": structure_result.overall_risk})
-        return {"messages": [response_msg]}
 
+        response_msg = AIMessage(content=formatted_text)
+
+        decision_counter.add(
+            1,
+            {"overall_risk": structure_result.overall_risk},
+        )
+
+        return {"messages": [response_msg]}
 
 def human_review_node(state: AgentState):
     last_message = state["messages"][-1]
@@ -808,7 +838,7 @@ class TransactionExtraction(BaseModel):
     transaction_count_last_hour: int | None = None
 
 
-transaction_extraction_llm = llm_risk.with_structured_output(TransactionExtraction)
+transaction_extraction_llm = llm.with_structured_output(TransactionExtraction)
 
 TRANSACTION_EXTRACTION_PROMPT = """
 Extract transaction information from the user's description.
@@ -830,7 +860,7 @@ def extract_transaction_data(description: str) -> dict:
     with tracer.start_as_current_span("extract_transaction_data") as span:
         span.set_attribute("operation", "transaction_extraction")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", llm_risk.model)  
+        span.set_attribute("llm.model", MODEL_NAME)  
 
         prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
 
