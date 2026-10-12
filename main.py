@@ -30,8 +30,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.trace import Status, StatusCode
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from opentelemetry.trace import Status, StatusCode
 from prometheus_client import CollectorRegistry, make_asgi_app
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_random_exponential
