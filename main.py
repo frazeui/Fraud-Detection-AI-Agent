@@ -893,73 +893,83 @@ async def analyze_transactions_with_documents(
     description: str = Form(...),
     document: UploadFile | None = None,
 ):
-    start = time.time()
+    start = time.perf_counter()
     request_counter.add(1, {"endpoint": "/analyze_transactions_with_documents"})
     try:
-        logger.info("Extracting transaction data...")
-        transaction_data = extract_transaction_data(description)
+        try:
+            logger.info("Extracting transaction data...")
+            transaction_data = extract_transaction_data(description)
 
-        if transaction_data:
-            logger.info(f"DEBUG: {type(transaction_data)} {transaction_data}")
-            with tracer.start_as_current_span("redis_store_transaction"):
-                redis_mapping = {k: str(v) for k, v in transaction_data.items()}
-                redis_client.hset(f"transaction:{thread_id}", mapping=redis_mapping)
-    except RuntimeError as e:
-        error_counter.add(1)
-        logger.error(f"Redis Error: {e}")
+            if transaction_data:
+                logger.info(f"DEBUG: {type(transaction_data)} {transaction_data}")
+                
+                with tracer.start_as_current_span("redis_store_transaction"):
+                    redis_mapping = {k: str(v) for k, v in transaction_data.items()}
+                    redis_client.hset(f"transaction:{thread_id}", mapping=redis_mapping)
+        
+        except RuntimeError as e:
+            error_counter.add(1)
+            logger.error(f"Transaction Error/Redis Error: {e}")
+            raise
 
-    if not document:
-        logger.info("[Document Verification] No document uploaded - skipping")
-    base64_image = None
-    if document:
-        max_file_size_mb = 5
-        image_bytes = await document.read()
+        
+        if not document:
+            logger.info("[Document Verification] No document uploaded - skipping")
 
-        if len(image_bytes) > max_file_size_mb * 1024 * 1024:
+        base64_image = None
+
+        if document:
+            max_file_size_mb = 5
+            image_bytes = await document.read()
+
+            if len(image_bytes) > max_file_size_mb * 1024 * 1024:
+                return {
+                    "status": "ERROR",
+                    "message": f"Document file size exceeds {max_file_size_mb} MB limit.",
+                }
+
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        config = {"configurable": {"thread_id": thread_id}}
+
+        with tracer.start_as_current_span("fraud_agent_graph") as span:
+            span.set_attribute("operation", "fraud_agent_graph")
+            span.set_attribute("document.provided", document is not None)
+
+            result = fraud_agent_app.invoke(  # type: ignore
+                {
+                    "messages": [HumanMessage(content=description)],
+                    "document_image": base64_image,
+                },
+                config=config,
+            )
+            
+            span.set_attribute("fraud.workflow_status", "completed")
+        if "__interrupt__" in result:
+            span.set_attribute("fraud.workflow_status", "pending_human_review")
+
+            interrupt_data = result["__interrupt__"][0].value
             return {
-                "status": "ERROR",
-                "message": f"Document file size exceeds {max_file_size_mb} MB limit.",
+                "status": "PENDING_REVIEW",
+                "thread_id": thread_id,
+                "ai_assessment": interrupt_data["decision_agent_assessment"],
+                "message": "High risk detected. Call /human_decision with your decision.",
+                "processing_time_seconds": round(time.perf_counter() - start, 2),
             }
-
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-    config = {"configurable": {"thread_id": thread_id}}
-
-    with tracer.start_as_current_span("fraud_agent_graph") as span:
-        span.set_attribute("operation", "fraud_agent_graph")
-        span.set_attribute("document.provided", document is not None)
-
-        result = fraud_agent_app.invoke(  # type: ignore
-            {
-                "messages": [HumanMessage(content=description)],
-                "document_image": base64_image,
-            },
-            config=config,
-        )
-
-        span.set_attribute("fraud.workflow_status", "completed")
-    if "__interrupt__" in result:
-        span.set_attribute("fraud.workflow_status", "pending_human_review")
-
-        interrupt_data = result["__interrupt__"][0].value
+        
+        
         return {
-            "status": "PENDING_REVIEW",
+            "status": "COMPLETED",
             "thread_id": thread_id,
-            "ai_assessment": interrupt_data["decision_agent_assessment"],
-            "message": "High risk detected. Call /human_decision with your decision.",
-            "processing_time_seconds": round(time.time() - start, 2),
+            "final_result": result["messages"][-1].content,
+            "processing_time_seconds": round(time.perf_counter() - start, 2),
         }
-    duration = time.time() - start
-    request_duration.record(
-        duration, {"endpoint": "/analyze_transactions_with_documents"}
-    )
-    return {
-        "status": "COMPLETED",
-        "thread_id": thread_id,
-        "final_result": result["messages"][-1].content,
-        "processing_time_seconds": round(duration, 2),
-    }
-
+    
+    finally:
+        duration = time.perf_counter() - start
+        request_duration.record(
+            duration, {"endpoint": "/analyze_transactions_with_documents"}
+        )
 
 @app.post("/human_decision")
 def human_decision(req: HumanDecisionRequest):
