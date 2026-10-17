@@ -1,7 +1,6 @@
 import base64
 import logging
 import os
-import re
 import time
 
 from dotenv import load_dotenv
@@ -270,6 +269,7 @@ class OpenRouterLLM(BaseChatModel):
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
+    risk_assessment:Risk_Assessment | None
     document_image: str | None
 
 
@@ -293,7 +293,7 @@ llm_risk = llm.bind_tools(risk_tools)
 structured_decision_llm = llm.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
-llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY)  # type: ignore
+llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY,timeout=30,max_retries=0)  # type: ignore
 document_verification_llm = llm_vision.with_structured_output(
     Document_Extraction_Result
 )
@@ -415,26 +415,54 @@ def risk_analyst_node(state: AgentState):
         span.set_attribute("operation", "risk_analysis")
 
         messages = state["messages"]
+
         if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=RISK_ANALYST_PROMPT)] + messages
+            messages = [SystemMessage(content=RISK_ANALYST_PROMPT),*messages] 
 
-        llm_start = time.time()
-        response = llm_risk.invoke(messages)
+        llm_start = time.perf_counter()
+        try:
+            response = llm_risk.invoke(messages)
+            has_tool_calls=bool(getattr(response,"tool_calls",None))
+            span.set_attribute("risk_analysis.success",True)
+            span.set_attribute("risk_analysis.has_tool_calls",has_tool_calls)
+            return {"messages": [response]}
+        
+        except Exception as e: 
+            error_counter.add(1,{"operation":"risk_analysis"})
+            span.set_attribute("risk_analysis.success",False)
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR,type(e).__name__))
 
-        llm_duration.record(
-            time.time() - llm_start, 
-            {"model": MODEL_NAME, "operation": "Risk Analysis"},
-        )
-        return {"messages": [response]}
+            raise
+
+        
+        finally:
+            llm_duration.record(
+                time.perf_counter() - llm_start, 
+                {"model": MODEL_NAME, "operation": "Risk Analysis"},
+            )
 
 
 risk_tool_node = ToolNode(risk_tools)
 
 
-def should_continue_risk_analysis(state: AgentState):
-    last_message = state["messages"][-1]
+def should_continue_risk_analysis(state: AgentState)->str:
+
+    message = state.get("messages",[])
+    if not message: raise ValueError("Risk analysis cannot continue: no message found")
+
+    last_message=message[-1]
+
+    if not isinstance(last_message,AIMessage):raise TypeError("Risk analysis cannot continue: expected AI Message")
+    
     if getattr(last_message, "tool_calls", None):
         return "risk_tools"
+
+    if not last_message.content:
+        raise TypeError(
+            "Risk analyst returned neither content nor tool calls."
+        )
+    
     return "document_verification"
 
 
@@ -451,8 +479,8 @@ def extract_document_fields_lightweight(
         span.set_attribute("operation", "document_extraction")
         span.set_attribute("vision.state", "lightweight")
 
+        vision_start = time.perf_counter()
         try:
-            vision_start = time.time()
 
             response = gemini_client.models.generate_content(
                 model=GEMINI_VISION_MODEL,
@@ -471,17 +499,26 @@ def extract_document_fields_lightweight(
                     "response_mime_type": "application/json",
                 },
             )
+            if not response or not response.text:
+                raise ValueError("Gemini returned an empty response")
 
-            llm_duration.record(
-                time.time() - vision_start,
-                {
-                    "model": GEMINI_VISION_MODEL,
-                    "operation": "document extraction with lightweight model",
-                },
-            )
+            parsed=json.loads(response.text)
+
+            result=Document_Extraction_Result.model_validate(parsed)
+
+            span.set_attribute("llm.response_received",True)
+            span.set_attribute("document.extraction_success",True)
+
+            return result
+
+            
 
         except RuntimeError as e:
             error_counter.add(1)
+
+            span.set_attribute('llm.response_received',False)
+            span.set_attribute('document.extraction_success',False)
+
 
             logger.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
 
@@ -489,40 +526,15 @@ def extract_document_fields_lightweight(
 
             return None
 
-        span.set_attribute(
-            "llm.response_received",
-            response is not None,
-        )
 
-        if not response or not response.text:
-            error_counter.add(1)
-            logger.error("[Lightweight Vision] Empty response from Gemini")
-            return None
-
-        try:
-            parsed = json.loads(response.text)
-
-        except json.JSONDecodeError as e:
-            error_counter.add(1)
-
-            logger.error(f"[Lightweight Vision] JSON parsing failed: {e}")
-
-            span.record_exception(e)
-
-            return None
-
-        try:
-            return Document_Extraction_Result.model_validate(parsed)
-
-        except RuntimeError as e:
-            error_counter.add(1)
-
-            logger.error(f"[Lightweight Vision] Schema validation failed: {e}")
-
-            span.record_exception(e)
-
-            return None
-
+        finally:
+            llm_duration.record(
+                            time.perf_counter() - vision_start,
+                            {
+                                "model": GEMINI_VISION_MODEL,
+                                "operation": "document extraction with lightweight model",
+                            },
+                        )
 
 def extract_document_fields_deep_reasoning(
     base64_image: str,
@@ -547,25 +559,36 @@ def extract_document_fields_deep_reasoning(
             result: Document_Extraction_Result = document_verification_llm.invoke(
                 [message]  # type: ignore
             )
+
+            if isinstance(result,Document_Extraction_Result):
+                validated_result=result
+            
+            else:
+                validated_result=Document_Extraction_Result.model_validate(result)
+
+
+            span.set_attribute("document.extraction_success", True)
+
+            return validated_result
+
+
+        except RuntimeError as e:
+            span.set_attribute('document.extraction_success',False)
+            error_counter.add(1)
+
+            logger.error(f"[Deep Reasoning Vision] Model failed: {type(e).__name__}")
+            return None  # type: ignore
+
+
+        finally:
             llm_duration.record(
                 time.time() - vision_time,
                 {
                     "model": "qwen/qwen3.8-27b",
-                    "operation": "extrat document field with deepweight model",
+                    "operation": "extract document fields with deepweight model",
                 },
             )
-            return (
-                result
-                if isinstance(result, Document_Extraction_Result)
-                else Document_Extraction_Result.model_validate(result)
-            )
-
-        except RuntimeError as e:
-            error_counter.add(1)
-            print(f"[Deep Reasoning Vision] Model failed: {e}")
-            return None  # type: ignore
-
-
+           
 def document_verification_node(state: AgentState):
     with tracer.start_as_current_span("verify document") as span:
         span.set_attribute("operation", "document_verification")
@@ -585,43 +608,58 @@ def document_verification_node(state: AgentState):
         try:
             extraction = extract_document_fields_lightweight(base64_image=base64_image)
 
-            if extraction:
-                span.set_attribute("vision.state", "lightweight")
-                span.set_attribute("document.authentic", extraction.appears_authentic)
-                span.set_attribute(
-                    "document.confidence_level", extraction.confidence_level
-                )
-                span.set_attribute("vision.escalated", False)
 
-            deep_extraction = extract_document_fields_deep_reasoning(
-                base64_image=base64_image
-            )
+            if extraction is None:
+                span.set_attribute('vision.state',"failed")
+                span.set_attribute('vision.escalated',False)
 
-            if not extraction:
-                summary_text = (
+                summary_text=(
                     "[Document Verification]\n"
-                    "No extraction result available. Manual review required."
+                    "Lightweight extraction returned no result. "
+                    "Manual document review required."
                 )
+                return {"message":AIMessage(summary_text)}
+
             else:
-                if (
-                    extraction.confidence_level == "Low"
-                    or extraction.appears_authentic in ["no", False]
-                ):
+                needs_escalation=( extraction.confidence_level == "Low" or extraction.appears_authentic in ["no", False])
+                
+                selected_extraction=extraction
+
+                if needs_escalation:
+                    span.set_attribute('vision.escalated',True)
                     print(
-                        "[Document Verification] Low confidence/Risk detected. Escalating to deep reasoning model..."
+                        "[Document Verification] Low confidence or "
+                        "suspicious document. Escalating to deep model..."
                     )
 
-                    if deep_extraction:
-                        span.set_attribute("vision.state", "deep_reasoning")
-                        span.set_attribute(
-                            "document.authentic", deep_extraction.appears_authentic
-                        )
-                        span.set_attribute(
-                            "document.confidence_level",
-                            deep_extraction.confidence_level,
-                        )
-                        span.set_attribute("vision.escalated", True)
+                    deep_extraction=( extract_document_fields_deep_reasoning(base64_image=base64_image))
 
+                    if deep_extraction is not None:
+                        selected_extraction=deep_extraction
+                        
+                        span.set_attribute('vision.state','deep_reasoning')
+                    
+                    else:
+                        span.set_attribute('vision.state','failed')
+
+                        summary_text=(
+                            "[Document Verification]\n"
+                            "Deep verification failed"
+                            "Manual document review required"
+                        )
+
+                        return {"message":[AIMessage(content=summary_text)]}
+
+                else: 
+                    span.set_attribute('vision.state','lightweight')
+                    span.set_attribute('vision.state',False)
+
+                
+                span.set_attribute('document.authentic',str(selected_extraction.appears_authentic))
+
+                span.set_attribute('document.confidence_level',str(selected_extraction.confidence_level))
+
+                
                 summary_text = (
                     f"[Document Verification]\n"
                     f"Document Type: {getattr(deep_extraction, 'document_type', 'N/A')}\n"
@@ -643,10 +681,7 @@ def document_verification_node(state: AgentState):
         return {"messages": [AIMessage(content=summary_text)]}
 
 
-@retry(
-    wait=wait_random_exponential(min=2, max=10),
-    stop=stop_after_attempt(2),
-)
+
 def decision_agent_node(state: AgentState):
     with tracer.start_as_current_span("decision_agent") as span:
         span.set_attribute("operation", "decision_agent")
@@ -712,6 +747,9 @@ def decision_agent_node(state: AgentState):
             )
 
         except Exception as e:
+            decision_status='fallback'
+            decision_counter.add(1,
+    {"operation": "decision_agent"},)
             error_counter.add(
                 1,
                 {"operation": "decision_agent"},
@@ -724,7 +762,7 @@ def decision_agent_node(state: AgentState):
 
             structure_result = Risk_Assessment(
                 overall_risk="HIGH",
-                recommendation="BLOCK",
+                recommendation="REVIEW",
                 justification=(
                     "Automated decision failed. "
                     "Fail-safe classification applied; manual review required."
@@ -737,6 +775,7 @@ def decision_agent_node(state: AgentState):
                 {  
                     "model": MODEL_NAME,
                     "operation": "decision_agent",
+                    "status":decision_status
                 },
             )
 
@@ -753,27 +792,36 @@ def decision_agent_node(state: AgentState):
             {"overall_risk": structure_result.overall_risk},
         )
 
-        return {"messages": [response_msg]}
+        return {"messages": [response_msg],"risk_assessment":structure_result}
 
 def human_review_node(state: AgentState):
-    last_message = state["messages"][-1]
-    assessment_text = last_message.content
+
+    assessment=state.get('risk_assessment')
+
+    if assessment is not None: 
+        human_decision = interrupt(
+            {
+                "question": "Decision Agent flagged this as HIGH risk / BLOCK. Please confirm.",
+                "decision_agent_assessment": state['messages'][-1].content if state.get("messages") else "No assessment available",
+            }
+        )
+        return {"messages":HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")}
+    
     needs_review = (
-        "HIGH" in assessment_text.upper() or "BLOCK" in assessment_text.upper()
+        assessment.overall_risk=='HIGH' or assessment.recommendation in {"BLOCK","REVIEW"} #type: ignore
     )
 
     if not needs_review:
         return {"messages": []}
-
     human_decision = interrupt(
         {
             "question": "Decision Agent flagged this as HIGH risk / BLOCK. Please confirm.",
-            "decision_agent_assessment": assessment_text,
-        }
-    )
-    confirmation_message = HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")
-    return {"messages": [confirmation_message]}
+            "decision_agent_assessment": state['messages'][-1].content if state.get("messages") else "No assessment available",
+            }
+        )
+    return {"messages":HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")}
 
+   
 
 graph = StateGraph(AgentState)
 graph.add_node("risk_analyst", risk_analyst_node)
@@ -869,22 +917,24 @@ def extract_transaction_data(description: str) -> dict:
         messages = [SystemMessage(content=prompt), HumanMessage(content=description)]
 
         try:
-            response = llm_risk.invoke(messages)
-            raw_text = response.content.strip()  # type: ignore
-            cleaned = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as e:
+            response:TransactionExtraction = transaction_extraction_llm.invoke(messages) #type: ignore
+            result=response.model_dump(exclude_none=True)
+
+            span.set_attribute("transaction.fields_extracted", len(result))
+            span.set_attribute("transaction.extraction_success",bool(result))
+            
+            return result
+
+        except RuntimeError as e:
+            
             error_counter.add(1)
+            span.set_attribute("transaction.extraction_success", False)
+            span.record_exception(e)
+
             logger.error(
                 f"[Transaction Extraction] Failed: {e} | raw: {locals().get('raw_text', 'N/A')}"
             )
             return {}
-
-        result = {k: v for k, v in parsed.items() if v is not None}
-
-        span.set_attribute("transaction.fields_extracted", len(result))
-
-        return result
 
 
 @app.post("/analyze_transactions_with_documents")
