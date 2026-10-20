@@ -20,3 +20,4 @@ mypy
 opentelemetry-exporter-prometheus
 prometheus-client
 google-genai
+filetype

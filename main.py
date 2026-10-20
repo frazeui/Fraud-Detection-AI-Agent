@@ -4,7 +4,6 @@ import os
 import time
 
 from dotenv import load_dotenv
-from langchain_core.tools.base import BaseTool
 
 load_dotenv()
 
@@ -13,7 +12,9 @@ from typing import Annotated, Literal, TypedDict
 from fastapi import FastAPI, Form, UploadFile
 from fastapi.staticfiles import StaticFiles
 from google import genai
+from google.genai import types
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -32,7 +33,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import CollectorRegistry, make_asgi_app
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 from redis_client import client as redis_client
@@ -118,9 +119,9 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 GEMINI_VISION_MODEL = "gemini-3.5-flash-lite"
 
-USER_PROFILES = {
-    "user_101": {"home_country": "UAE", "avg_transaction": 500},
-    "user_102": {"home_country": "Pakistan", "avg_transaction": 200},
+USER_PROFILES:dict[str,dict[str,str|float]] = {
+    "user_101": {"home_country": "UAE", "avg_transaction": 500.0},
+    "user_102": {"home_country": "Pakistan", "avg_transaction": 200.0},
 }
 
 # -----------------------------------------------------------
@@ -131,12 +132,20 @@ USER_PROFILES = {
 )
 def check_amount_risk(amount: float, user_id: str) -> str:
     profile = USER_PROFILES.get(user_id)
-    if not profile:
+    if profile is None:
         return "Error: User profile not found"
+    
     avg = profile["avg_transaction"]
-    if amount > avg * 10:  # type: ignore
-        return f"HIGH RISK: Amount ${amount} is {round(amount / avg, 1)}x higher than user's average (${avg})"  # type: ignore
-    elif amount > avg * 3:  # type: ignore
+    
+    if not isinstance(avg,(int,float)):
+        return "Error: Invalid average transaction amount"
+    
+    avg=float(avg)
+    if avg<=0.0: return "Error: Invalid average transaction amount."
+
+    if amount > avg * 10.0:  
+        return f"HIGH RISK: Amount ${amount} is {round(amount / avg, 1)}x higher than user's average (${avg})" 
+    elif amount > avg * 3.0:  
         return f"MEDIUM RISK: Amount ${amount} is notably higher than average (${avg})"
     return f"LOW RISK: Amount ${amount} is within normal range (avg: ${avg})"
 
@@ -144,12 +153,17 @@ def check_amount_risk(amount: float, user_id: str) -> str:
 @tool
 def check_velocity(transaction_count_last_hour: int) -> str:
     """Checks how many transactions occurred in the last hour."""
+
+    if transaction_count_last_hour<0:return "Error: Transaction count cannot be negative "
+
     if transaction_count_last_hour >= 5:
         return f"HIGH RISK: {transaction_count_last_hour} transactions in the last hour - unusual velocity"
+    
     elif transaction_count_last_hour >= 3:
         return (
             f"MEDIUM RISK: {transaction_count_last_hour} transactions in the last hour"
         )
+    
     return f"LOW RISK: {transaction_count_last_hour} transaction(s) in the last hour - normal"
 
 
@@ -161,7 +175,7 @@ def check_location_mismatch(user_id: str, transaction_country: str) -> str:
     if not profile:
         return "Error: User profile not found"
     home = profile["home_country"]
-    if home.lower() != transaction_country.lower(): #type: ignore
+    if home.lower() != transaction_country.lower():  # type: ignore
         return f"MEDIUM RISK: Transaction from {transaction_country}, but user's home country is {home}"
     return (
         f"LOW RISK: Transaction location ({transaction_country}) matches home country"
@@ -178,9 +192,9 @@ def run_risk_tools_parallel(
 ):
     with ThreadPoolExecutor() as executor:
         futures: list[Future[str]] = [
-            executor.submit(check_amount_risk, amount, user_id),  # type: ignore
-            executor.submit(check_velocity, transaction_count_last_hour),  # type: ignore
-            executor.submit(check_location_mismatch, user_id, country),  # type: ignore
+            executor.submit(check_amount_risk.invoke, {"amount":amount,"user_id": user_id}),  
+            executor.submit(check_velocity.invoke, {"transaction_count_last_hour":transaction_count_last_hour}),  
+            executor.submit(check_location_mismatch.invoke, {"user_id":user_id, "country":country}),  
         ]
         return [f.result() for f in futures]
 
@@ -226,65 +240,32 @@ class Document_Extraction_Result(BaseModel):
     )
 
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.outputs import ChatGeneration, ChatResult
-
-
-class OpenRouterLLM(BaseChatModel):
-    client: object
-    model: str
-
-    @property
-    def _llm_type(self) -> str:
-        return "openrouter"
-
-    @property
-    def _identifying_params(self) -> dict:
-        return {"model": self.model}
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        formatted_message = []
-        for m in messages:
-            role = getattr(m, "role", "user")
-            safe_content = " "
-            if isinstance(m.content, list):
-                formatted_message.append({"role": role, "content": m.content})
-            else:
-                safe_content = str(m.content)
-            formatted_message.append({"role": role, "content": safe_content})
-        response = self.client.chat.completions.create(
-            model=self.model, messages=formatted_message, **kwargs
-        )
-        content = response.choices[0].message.content
-        return ChatResult(
-            generations=[ChatGeneration(message=AIMessage(content=content))]
-        )
-
-    def bind_tools(self, tools: list[BaseTool], **kwargs) -> "OpenRouterLLM":  # type: ignore
-        """
-        this is the function that binds the tools to the llm and returns a new llm instance with the tools bound
-        """
-        return self
-
-
-class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    risk_assessment:Risk_Assessment | None
-    document_image: str | None
-
-
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-
-# Lighter weight vision models for document verification
 
 
 OPENROUTER_API_KEY: str | None = os.environ.get("OPEN_ROUTER_API_KEY")
 
+if not OPENROUTER_API_KEY: raise RuntimeError('OPEN_ROUTER_API_KEY is missing')
+
+
 llm = ChatOpenAI(
-    api_key=OPENROUTER_API_KEY, #type: ignore
+    api_key=OPENROUTER_API_KEY,  # type: ignore
     base_url="https://openrouter.ai/api/v1",
     model="meta-llama/llama-3.1-8b-instruct",
 )
+
+
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    risk_assessment: Risk_Assessment | None
+    document_image: str | None
+
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing or empty")
+api_key=SecretStr(GROQ_API_KEY)
+
 
 MODEL_NAME = "meta-llama/llama-3.1-8b-instruct"
 
@@ -293,7 +274,10 @@ llm_risk = llm.bind_tools(risk_tools)
 structured_decision_llm = llm.with_structured_output(Risk_Assessment)
 
 # deep weight vision model for document verification
-llm_vision = ChatGroq(model="qwen/qwen3.8-27b", api_key=GROQ_API_KEY,timeout=30,max_retries=0)  # type: ignore
+llm_vision = ChatGroq(
+    name="vision_model",    
+    model="qwen/qwen3.8-27b", api_key=api_key, timeout=30, max_retries=0
+) 
 document_verification_llm = llm_vision.with_structured_output(
     Document_Extraction_Result
 )
@@ -410,35 +394,36 @@ Now output the JSON for the actual image shown:"""
 @retry(wait=wait_random_exponential(min=2, max=10), stop=stop_after_attempt(2))
 def risk_analyst_node(state: AgentState):
     with tracer.start_as_current_span("risk_analyst") as span:
-        span.set_attribute("llm_provider", "openrouter") 
+        span.set_attribute("llm_provider", "openrouter")
         span.set_attribute("llm.model", MODEL_NAME)
         span.set_attribute("operation", "risk_analysis")
 
         messages = state["messages"]
 
         if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=RISK_ANALYST_PROMPT),*messages] 
+            messages = [SystemMessage(content=RISK_ANALYST_PROMPT), *messages]
 
         llm_start = time.perf_counter()
         try:
             response = llm_risk.invoke(messages)
-            has_tool_calls=bool(getattr(response,"tool_calls",None))
-            span.set_attribute("risk_analysis.success",True)
-            span.set_attribute("risk_analysis.has_tool_calls",has_tool_calls)
+            has_tool_calls = bool(response.tool_calls)
+
+            span.set_attribute("risk_analysis.success", True)
+            span.set_attribute("risk_analysis.has_tool_calls", has_tool_calls)
+
             return {"messages": [response]}
-        
-        except Exception as e: 
-            error_counter.add(1,{"operation":"risk_analysis"})
-            span.set_attribute("risk_analysis.success",False)
+
+        except Exception as e:
+            error_counter.add(1, {"operation": "risk_analysis"})
+            span.set_attribute("risk_analysis.success", False)
             span.record_exception(e)
-            span.set_status(Status(StatusCode.ERROR,type(e).__name__))
+            span.set_status(Status(StatusCode.ERROR, type(e).__name__))
 
             raise
 
-        
         finally:
             llm_duration.record(
-                time.perf_counter() - llm_start, 
+                time.perf_counter() - llm_start,
                 {"model": MODEL_NAME, "operation": "Risk Analysis"},
             )
 
@@ -446,27 +431,31 @@ def risk_analyst_node(state: AgentState):
 risk_tool_node = ToolNode(risk_tools)
 
 
-def should_continue_risk_analysis(state: AgentState)->str:
+def should_continue_risk_analysis(state: AgentState) -> str:
 
-    message = state.get("messages",[])
-    if not message: raise ValueError("Risk analysis cannot continue: no message found")
+    message = state.get("messages", [])
 
-    last_message=message[-1]
+    if not message:
+        raise ValueError("Risk analysis cannot continue: no message found")
 
-    if not isinstance(last_message,AIMessage):raise TypeError("Risk analysis cannot continue: expected AI Message")
+    last_message = message[-1]
+
+    if not isinstance(last_message, AIMessage):
+
+        raise TypeError("Risk analysis cannot continue: expected AI Message")
+
+    if last_message.tool_calls:return "risk_tools"
+
     
-    if getattr(last_message, "tool_calls", None):
-        return "risk_tools"
-
     if not last_message.content:
-        raise TypeError(
-            "Risk analyst returned neither content nor tool calls."
-        )
-    
+        raise TypeError("Risk analyst returned neither content nor tool calls.")
+
     return "document_verification"
 
 
 import json
+
+from pydantic import ValidationError
 
 
 def extract_document_fields_lightweight(
@@ -480,45 +469,41 @@ def extract_document_fields_lightweight(
         span.set_attribute("vision.state", "lightweight")
 
         vision_start = time.perf_counter()
-        try:
 
+        import filetype
+        SUPPORTED_TYPES={"application/pdf","image/jpeg","image/png"}
+
+        try:
+            file_bytes = base64.b64decode(base64_image, validate=True)
+            kind=filetype.guess(file_bytes)
+            if kind is None or kind.mime not in SUPPORTED_TYPES: 
+                raise ValueError("Unspported or invalid document format")
+            mime_type=kind.mime
+            image_part=types.Part.from_bytes(data=file_bytes,mime_type=mime_type)
             response = gemini_client.models.generate_content(
                 model=GEMINI_VISION_MODEL,
-                contents=[ #type: ignore
-                    {
-                        "text": LIGHTWEIGHT_VISION_PROMPT,
-                    },
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": base64_image,
-                        },
-                    },
+                contents=[  # type: ignore
+                    LIGHTWEIGHT_VISION_PROMPT,
+                    image_part
                 ],
-                config={
-                    "response_mime_type": "application/json",
-                },
+                config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             if not response or not response.text:
                 raise ValueError("Gemini returned an empty response")
 
-            parsed=json.loads(response.text)
+            parsed = json.loads(response.text)
 
-            result=Document_Extraction_Result.model_validate(parsed)
+            result = Document_Extraction_Result.model_validate(parsed)
 
-            span.set_attribute("llm.response_received",True)
-            span.set_attribute("document.extraction_success",True)
+            span.set_attribute("llm.response_received", True)
+            span.set_attribute("document.extraction_success", True)
 
             return result
-
-            
-
-        except RuntimeError as e:
+        except (ValueError,json.JSONDecodeError,ValidationError) as e:
             error_counter.add(1)
 
-            span.set_attribute('llm.response_received',False)
-            span.set_attribute('document.extraction_success',False)
-
+            span.set_attribute("llm.response_received", False)
+            span.set_attribute("document.extraction_success", False)
 
             logger.error(f"[Lightweight Vision] Call failed: {type(e).__name__}: {e}")
 
@@ -526,18 +511,28 @@ def extract_document_fields_lightweight(
 
             return None
 
+        except Exception as e:
+
+            error_counter.add(1, {"operation": "document_extraction"})
+            span.set_attribute("document.extraction_success", False)
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, type(e).__name__))
+            raise
+
 
         finally:
             llm_duration.record(
-                            time.perf_counter() - vision_start,
-                            {
-                                "model": GEMINI_VISION_MODEL,
-                                "operation": "document extraction with lightweight model",
-                            },
-                        )
+                time.perf_counter() - vision_start,
+                {
+                    "model": GEMINI_VISION_MODEL,
+                    "operation": "document extraction with lightweight model",
+                },
+            )
+
 
 def extract_document_fields_deep_reasoning(
     base64_image: str,
+    mime_type:str="image/jpeg"
 ) -> Document_Extraction_Result:
     with tracer.start_as_current_span("extract_document_fields_deep_reasoning") as span:
         span.set_attribute("llm_provider", "groq")
@@ -545,58 +540,61 @@ def extract_document_fields_deep_reasoning(
         span.set_attribute("operation", "document_verification")
         span.set_attribute("vision_stage", "deep_reasoning")
 
+        vision_time = time.perf_counter()
         message = HumanMessage(
             content=[
                 {"type": "text", "text": DOCUMENT_VERIFICATION_PROMPT},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                    "image_url": {"url": f"data:{mime_type};base64,{base64_image}"},
                 },
             ]
         )
         try:
-            vision_time = time.time()
             result: Document_Extraction_Result = document_verification_llm.invoke(
                 [message]  # type: ignore
             )
 
-            if isinstance(result,Document_Extraction_Result):
-                validated_result=result
-            
-            else:
-                validated_result=Document_Extraction_Result.model_validate(result)
+            if isinstance(result, Document_Extraction_Result):
+                validated_result = result
 
+            elif isinstance(result,dict):validated_result=Document_Extraction_Result.model_validate(result)
+
+            else:raise TypeError(f"Unexpected model response type: {type(result).__name__}")
 
             span.set_attribute("document.extraction_success", True)
 
             return validated_result
 
-
-        except RuntimeError as e:
-            span.set_attribute('document.extraction_success',False)
+        except (ValueError,ValidationError) as e:
             error_counter.add(1)
+            span.set_attribute("document.extraction_success", False)
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR,type(e).__name__))
 
             logger.error(f"[Deep Reasoning Vision] Model failed: {type(e).__name__}")
             return None  # type: ignore
 
-
         finally:
             llm_duration.record(
-                time.time() - vision_time,
+                time.perf_counter()-vision_time,
                 {
                     "model": "qwen/qwen3.8-27b",
                     "operation": "extract document fields with deepweight model",
                 },
             )
-           
+
+
 def document_verification_node(state: AgentState):
+
     with tracer.start_as_current_span("verify document") as span:
         span.set_attribute("operation", "document_verification")
-        span.set_attribute("llm_provider", bool(state.get("document_image")))
 
         base64_image = state.get("document_image")
 
         if not base64_image:
+            span.set_attribute("vision.state", "skipped")
+            span.set_attribute("vision.manual_review_required", True)
             return {
                 "messages": [
                     AIMessage(
@@ -606,87 +604,123 @@ def document_verification_node(state: AgentState):
             }
 
         try:
+            span.set_attribute("llm_provider", "google")
+            span.set_attribute("vision.stage", "lightweight")
+
             extraction = extract_document_fields_lightweight(base64_image=base64_image)
 
-
             if extraction is None:
-                span.set_attribute('vision.state',"failed")
-                span.set_attribute('vision.escalated',False)
+                span.set_attribute("vision.state", "failed")
+                span.set_attribute("vision.escalated", False)
+                span.set_attribute("vision.manual_review_required", True)
 
-                summary_text=(
+                summary_text = (
                     "[Document Verification]\n"
-                    "Lightweight extraction returned no result. "
+                    "Lightweight extraction returned no result.\n"
                     "Manual document review required."
                 )
-                return {"message":AIMessage(summary_text)}
+                return {"messages": [AIMessage(content=summary_text)]}
 
-            else:
-                needs_escalation=( extraction.confidence_level == "Low" or extraction.appears_authentic in ["no", False])
-                
-                selected_extraction=extraction
+            selected_extraction = extraction
 
-                if needs_escalation:
-                    span.set_attribute('vision.escalated',True)
-                    print(
-                        "[Document Verification] Low confidence or "
-                        "suspicious document. Escalating to deep model..."
-                    )
+            confidence = (
+                str(getattr(extraction, "confidence_level", None)or "Unknown").strip().lower()
+            )
+            authenticity = getattr(extraction, "appears_authentic", None)
 
-                    deep_extraction=( extract_document_fields_deep_reasoning(base64_image=base64_image))
+            authenticity_is_positive = authenticity is True or (
+                isinstance(authenticity, str)
+                and authenticity.strip().lower() in {"true", "yes"}
+            )
 
-                    if deep_extraction is not None:
-                        selected_extraction=deep_extraction
-                        
-                        span.set_attribute('vision.state','deep_reasoning')
-                    
-                    else:
-                        span.set_attribute('vision.state','failed')
+            needs_escalation = confidence != "high" or not authenticity_is_positive
+            span.set_attribute("vision.escalated", needs_escalation)
 
-                        summary_text=(
-                            "[Document Verification]\n"
-                            "Deep verification failed"
-                            "Manual document review required"
-                        )
+            if needs_escalation:
+                span.set_attribute("vision.escalated", True)
+                span.set_attribute("llm_provider", "groq")
+                span.set_attribute("vision.stage", "deep_reasoning")
 
-                        return {"message":[AIMessage(content=summary_text)]}
-
-                else: 
-                    span.set_attribute('vision.state','lightweight')
-                    span.set_attribute('vision.state',False)
-
-                
-                span.set_attribute('document.authentic',str(selected_extraction.appears_authentic))
-
-                span.set_attribute('document.confidence_level',str(selected_extraction.confidence_level))
-
-                
-                summary_text = (
-                    f"[Document Verification]\n"
-                    f"Document Type: {getattr(deep_extraction, 'document_type', 'N/A')}\n"
-                    f"Appears Authentic: {getattr(deep_extraction, 'appears_authentic', 'N/A')}\n"
-                    f"Red Flags: {getattr(deep_extraction, 'red_flags', 'N/A')}\n"
-                    f"Font Consistency: {getattr(deep_extraction, 'font_consistency', 'N/A')}\n"
-                    f"Confidence Level: {getattr(deep_extraction, 'confidence_level', 'N/A')}"
+                deep_extraction = extract_document_fields_deep_reasoning(
+                    base64_image=base64_image
                 )
 
-        except RuntimeError as e:
-            error_counter.add(1)
-            print(f"[Document Verification Error] {type(e).__name__}: {e}")
+                if deep_extraction is None:
+                    span.set_attribute("vision.state", "failed")
+                    span.set_attribute("vision.manual_review_required", True)
+
+                    summary_text = (
+                        "[Document Verification]\n"
+                        "Deep verification failed\n"
+                        "Manual document review required"
+                    )
+
+                    return {"messages": [AIMessage(content=summary_text)]}
+
+                selected_extraction = deep_extraction
+
+                span.set_attribute("vision.state", "deep_reasoning")
+                span.set_attribute("llm_provider", "groq")
+
+            else:
+                span.set_attribute("vision.state", "lightweight")
+                span.set_attribute("vision.escalated", False)
+
+            final_authenticity = getattr(selected_extraction, "appears_authentic", None)
+
+            final_authenticity_is_positive = (
+                final_authenticity is True
+                or isinstance(final_authenticity, str)
+                and final_authenticity.strip().lower() in {"true", "yes"}
+            )
+
+            final_confidence = str(
+                getattr(selected_extraction, "confidence_level", None)or "Unknown").strip().lower()
+
+            summary_text = (
+                f"[Document Verification]\n"
+                f"Document Type: {getattr(selected_extraction, 'document_type', 'N/A')}\n"
+                f"Appears Authentic: {getattr(selected_extraction, 'appears_authentic', 'N/A')}\n"
+                f"Red Flags: {getattr(selected_extraction, 'red_flags', 'N/A')}\n"
+                f"Font Consistency: {getattr(selected_extraction, 'font_consistency', 'N/A')}\n"
+                f"Confidence Level: {getattr(selected_extraction, 'confidence_level', 'N/A')}"
+            )
+
+            manual_review_required = (
+                not final_authenticity_is_positive or final_confidence != "high"
+            )
+
+            span.set_attribute("document.appears_authentic", str(final_authenticity))
+            span.set_attribute("vision.manual_review_required", manual_review_required)
+
+            if manual_review_required:
+                summary_text += "\nMANUAL document review required before approval."
+
+            return {"messages": [AIMessage(content=summary_text)],'manual_review_required':manual_review_required}
+
+        except Exception as e:
+            error_counter.add(1, {"operation": "document_verification"})
+            span.record_exception(e)
+            span.set_status(StatusCode.ERROR, "Document Verification failed")
+            span.set_attribute("vision.stage", "error")
+            span.set_attribute("vision.manual_review_required", True)
+
+            logger.exception(f"[Document Verification Error] {type(e).__name__}")
+
             summary_text = (
                 "[Document Verification]\n"
-                "Automated document verification failed due to a technical issue. "
+                "Automated document verification failed due to a technical issue. \n"
                 "This transaction requires MANUAL document review before approval."
             )
 
-        return {"messages": [AIMessage(content=summary_text)]}
-
+            return {"messages": [AIMessage(content=summary_text)],'manual_review_required':True}
 
 
 def decision_agent_node(state: AgentState):
     with tracer.start_as_current_span("decision_agent") as span:
         span.set_attribute("operation", "decision_agent")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", MODEL_NAME) 
+        span.set_attribute("llm.model", MODEL_NAME)
 
         risk_findings = None
         document_findings = None
@@ -722,8 +756,9 @@ def decision_agent_node(state: AgentState):
         ]
 
         start_time = time.perf_counter()
-
+        decision_status="unknown"
         try:
+            decision_status="success"
             response = structured_decision_llm.invoke(decision_input)
 
             if isinstance(response, Risk_Assessment):
@@ -747,9 +782,11 @@ def decision_agent_node(state: AgentState):
             )
 
         except Exception as e:
-            decision_status='fallback'
-            decision_counter.add(1,
-    {"operation": "decision_agent"},)
+            decision_status = "fallback"
+            decision_counter.add(
+                1,
+                {"operation": "decision_agent"},
+            )
             error_counter.add(
                 1,
                 {"operation": "decision_agent"},
@@ -768,17 +805,22 @@ def decision_agent_node(state: AgentState):
                     "Fail-safe classification applied; manual review required."
                 ),
             )
-
+        
         finally:
             llm_duration.record(
                 time.perf_counter() - start_time,
-                {  
+                {
                     "model": MODEL_NAME,
                     "operation": "decision_agent",
-                    "status":decision_status
+                    "status": decision_status,
                 },
             )
-
+        if state.get('manual_review_required',False):
+            structure_result=structure_result.model_copy(update={
+                "Recommendation":"REVIEW",
+                "justification":f"{structure_result.justification}"
+                "Manual document review is mendatory"
+            })
         formatted_text = (
             f"Overall Risk: {structure_result.overall_risk}\n"
             f"Recommendation: {structure_result.recommendation}\n"
@@ -792,36 +834,36 @@ def decision_agent_node(state: AgentState):
             {"overall_risk": structure_result.overall_risk},
         )
 
-        return {"messages": [response_msg],"risk_assessment":structure_result}
+        return {"messages": [response_msg], "risk_assessment": structure_result}
+
 
 def human_review_node(state: AgentState):
 
-    assessment=state.get('risk_assessment')
+    assessment = state.get("risk_assessment")
 
-    if assessment is not None: 
-        human_decision = interrupt(
-            {
-                "question": "Decision Agent flagged this as HIGH risk / BLOCK. Please confirm.",
-                "decision_agent_assessment": state['messages'][-1].content if state.get("messages") else "No assessment available",
-            }
-        )
-        return {"messages":HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")}
-    
     needs_review = (
-        assessment.overall_risk=='HIGH' or assessment.recommendation in {"BLOCK","REVIEW"} #type: ignore
+        assessment is None
+        or assessment.overall_risk == "HIGH"
+        or assessment.recommendation in {"BLOCK", "REVIEW"}
+        or state.get("manual_review_required", False)
     )
 
     if not needs_review:
         return {"messages": []}
-    human_decision = interrupt(
-        {
-            "question": "Decision Agent flagged this as HIGH risk / BLOCK. Please confirm.",
-            "decision_agent_assessment": state['messages'][-1].content if state.get("messages") else "No assessment available",
-            }
-        )
-    return {"messages":HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")}
 
-   
+    human_decision = interrupt({
+        "question": "Manual review required. Please confirm the decision.",
+        "decision_agent_assessment": (
+            state["messages"][-1].content
+            if state.get("messages")
+            else "No assessment available"
+        ),
+    })
+
+    return {
+        "messages": [HumanMessage(content=f"[HUMAN REVIEW]: {human_decision}")]
+    }
+
 
 graph = StateGraph(AgentState)
 graph.add_node("risk_analyst", risk_analyst_node)
@@ -845,7 +887,21 @@ graph.add_edge("human_review", END)
 class PatchedRedisSaver(RedisSaver):
     def _get_latest_checkpoint_document(self, thread_id, checkpoint_ns):
         checkpoint_key = f"{thread_id}:{checkpoint_ns}"
-        return self._redis.json().get(str(checkpoint_key), "$")
+        result=self._redis.json().get(str(checkpoint_key), "$")
+        
+        if result is None:
+            return None
+
+        if isinstance(result, list):
+            result = result[0] if result else None
+
+        if result is None:
+            return None
+
+        if not isinstance(result, dict):
+            raise TypeError("Redis checkpoint must be a dictionary")
+
+        return result
 
 
 memory = PatchedRedisSaver(
@@ -908,7 +964,7 @@ def extract_transaction_data(description: str) -> dict:
     with tracer.start_as_current_span("extract_transaction_data") as span:
         span.set_attribute("operation", "transaction_extraction")
         span.set_attribute("llm_provider", "openrouter")
-        span.set_attribute("llm.model", MODEL_NAME)  
+        span.set_attribute("llm.model", MODEL_NAME)
 
         prompt = f"""{TRANSACTION_EXTRACTION_PROMPT}
 
@@ -917,16 +973,17 @@ def extract_transaction_data(description: str) -> dict:
         messages = [SystemMessage(content=prompt), HumanMessage(content=description)]
 
         try:
-            response:TransactionExtraction = transaction_extraction_llm.invoke(messages) #type: ignore
-            result=response.model_dump(exclude_none=True)
+            response: TransactionExtraction = transaction_extraction_llm.invoke(
+                messages
+            )  # type: ignore
+            result = response.model_dump(exclude_none=True)
 
             span.set_attribute("transaction.fields_extracted", len(result))
-            span.set_attribute("transaction.extraction_success",bool(result))
-            
+            span.set_attribute("transaction.extraction_success", bool(result))
+
             return result
 
         except RuntimeError as e:
-            
             error_counter.add(1)
             span.set_attribute("transaction.extraction_success", False)
             span.record_exception(e)
@@ -952,17 +1009,16 @@ async def analyze_transactions_with_documents(
 
             if transaction_data:
                 logger.info(f"DEBUG: {type(transaction_data)} {transaction_data}")
-                
+
                 with tracer.start_as_current_span("redis_store_transaction"):
                     redis_mapping = {k: str(v) for k, v in transaction_data.items()}
                     redis_client.hset(f"transaction:{thread_id}", mapping=redis_mapping)
-        
+
         except RuntimeError as e:
             error_counter.add(1)
             logger.error(f"Transaction Error/Redis Error: {e}")
             raise
 
-        
         if not document:
             logger.info("[Document Verification] No document uploaded - skipping")
 
@@ -980,20 +1036,23 @@ async def analyze_transactions_with_documents(
 
             base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config:RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        
+        initial_state: AgentState = {
+            "messages": [HumanMessage(content=description)],
+            "risk_assessment":None,
+            "document_image": base64_image,
+        }
 
         with tracer.start_as_current_span("fraud_agent_graph") as span:
             span.set_attribute("operation", "fraud_agent_graph")
             span.set_attribute("document.provided", document is not None)
 
-            result = fraud_agent_app.invoke(  # type: ignore
-                {
-                    "messages": [HumanMessage(content=description)],
-                    "document_image": base64_image,
-                },
+            result = fraud_agent_app.invoke(  
+                initial_state,
                 config=config,
             )
-            
+
             span.set_attribute("fraud.workflow_status", "completed")
         if "__interrupt__" in result:
             span.set_attribute("fraud.workflow_status", "pending_human_review")
@@ -1006,20 +1065,20 @@ async def analyze_transactions_with_documents(
                 "message": "High risk detected. Call /human_decision with your decision.",
                 "processing_time_seconds": round(time.perf_counter() - start, 2),
             }
-        
-        
+
         return {
             "status": "COMPLETED",
             "thread_id": thread_id,
             "final_result": result["messages"][-1].content,
             "processing_time_seconds": round(time.perf_counter() - start, 2),
         }
-    
+
     finally:
         duration = time.perf_counter() - start
         request_duration.record(
             duration, {"endpoint": "/analyze_transactions_with_documents"}
         )
+
 
 @app.post("/human_decision")
 def human_decision(req: HumanDecisionRequest):
