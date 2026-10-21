@@ -6,4 +6,4 @@ scrape_configs:
     metrics_path: "/metrics"
     scheme: "https"
     static_configs:
-      - targets: ["fraud-detection-ai-agent-guzv6so9a-frazeuis-projects.vercel.app"]
+      - targets: ["fraud-detection-ai-agent-woad.vercel.app"]
