@@ -57,6 +57,9 @@ promethus_registry = CollectorRegistry()
 reader = PrometheusMetricReader(registry=promethus_registry)
 meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
 
+print("Meter provider:", metrics.get_meter_provider())
+print("Custom registry collectors:", list(promethus_registry.collect()))
+
 metrics.set_meter_provider(meter_provider)
 
 meter = metrics.get_meter("fraud-detection-agent v3")
